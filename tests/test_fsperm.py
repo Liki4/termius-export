@@ -50,5 +50,60 @@ class IcaclsArgsTests(unittest.TestCase):
         self.assertIn(r"C:\Users\First Last\out", args)
 
 
+import stat
+import tempfile
+from pathlib import Path
+
+from termius_export import fsperm
+
+
+@unittest.skipIf(fsperm.IS_WINDOWS, "POSIX permission semantics")
+class PosixSecureTests(unittest.TestCase):
+    def setUp(self):
+        fsperm._secured.clear()
+
+    def test_secure_dir_sets_0700(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "out"
+            d.mkdir()
+            d.chmod(0o755)
+            fsperm.secure_dir(d)
+            self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+
+    def test_secure_file_sets_requested_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "key"
+            f.write_text("x")
+            f.chmod(0o644)
+            fsperm.secure_file(f, 0o600)
+            self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+
+    def test_secure_file_honours_a_non_private_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "key.pub"
+            f.write_text("x")
+            fsperm.secure_file(f, 0o644)
+            self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o644)
+
+
+class MemoizationTests(unittest.TestCase):
+    def test_secure_dir_only_hardens_once_per_path(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "out"
+            d.mkdir()
+            original = fsperm._harden_dir
+            fsperm._harden_dir = lambda p: calls.append(p)
+            fsperm._secured.clear()
+            try:
+                fsperm.secure_dir(d)
+                fsperm.secure_dir(d)
+                fsperm.secure_dir(d)
+            finally:
+                fsperm._harden_dir = original
+                fsperm._secured.clear()
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

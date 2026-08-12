@@ -72,3 +72,80 @@ def _icacls_args(path: str | pathlib.Path, sid: str) -> list[str]:
     ``(OI)(CI)F`` gives the user full control that new files and subdirectories inherit.
     """
     return ["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"]
+
+
+def _current_user_sid() -> str | None:
+    if not shutil.which("whoami"):
+        return None
+    try:
+        result = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_sid(result.stdout)
+
+
+def _harden_dir(path: pathlib.Path) -> None:
+    """Apply the platform's directory protection. Split out so tests can substitute it."""
+    if not IS_WINDOWS:
+        os.chmod(path, 0o700)
+        return
+
+    if not shutil.which("icacls"):
+        _warn(f"icacls not found; {path} keeps inherited permissions and may be readable by other accounts")
+        return
+
+    sid = _current_user_sid()
+    if sid is None:
+        _warn(f"could not determine the current user's SID; {path} keeps inherited permissions")
+        return
+
+    try:
+        result = subprocess.run(
+            _icacls_args(path, sid),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _warn(f"icacls failed on {path} ({exc}); it keeps inherited permissions")
+        return
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        _warn(f"icacls failed on {path}: {detail[0] if detail else 'unknown error'}")
+
+
+def secure_dir(path: str | pathlib.Path) -> None:
+    """Restrict a directory to the current user. Idempotent per path.
+
+    Memoized because every private write hardens its parent directory. On POSIX that only
+    saves a redundant syscall and the end state is identical; on Windows it avoids spawning
+    one ``icacls`` process per exported key.
+    """
+    p = pathlib.Path(path)
+    if p in _secured:
+        return
+    _secured.add(p)
+    _harden_dir(p)
+
+
+def secure_file(path: str | pathlib.Path, mode: int) -> None:
+    """Restrict a single file.
+
+    Deliberately a no-op on Windows: the file already inherits the restrictive ACL that
+    ``secure_dir`` put on its parent, so a per-file ``icacls`` call would be redundant. This
+    does mean public keys and known_hosts (mode 0644) end up user-only on Windows, which is
+    harmless - they hold no secrets and nothing reads them from another account.
+    """
+    if IS_WINDOWS:
+        return
+    pathlib.Path(path).chmod(mode)
