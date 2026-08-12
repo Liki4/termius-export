@@ -75,7 +75,10 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
         if not h.address:
             continue
         out = _run(["ssh", "-G", "-F", str(path), h.alias]).stdout
-        if _ssh_config_value(out, "hostname") != h.address:
+        # ssh canonicalises the hostname to lower case, so "EXAMPLE-Web-Host4" comes back as
+        # "example-web-host4". DNS is case-insensitive; comparing case-sensitively here reported
+        # every host with an uppercase address as a mismatch.
+        if _ssh_config_value(out, "hostname").lower() != h.address.lower():
             mismatches.append(f"{h.alias}: hostname")
         elif _ssh_config_value(out, "port") != str(h.port):
             mismatches.append(f"{h.alias}: port")
@@ -114,18 +117,47 @@ def verify_csv(path: pathlib.Path, model: Model) -> list[Check]:
     return [Check("csv: parse and row compare", True, f"{len(rows)} rows, all addresses match")]
 
 
+def _quoted_scalar(line: str) -> str | None:
+    """Return the double-quoted scalar on a YAML line, or None if it carries none.
+
+    Handles the three shapes this writer emits: ``key: "value"``, ``- key: "value"`` and a
+    bare ``- "value"`` list item.
+    """
+    stripped = line.strip()
+    if stripped.startswith("- "):
+        stripped = stripped[2:].strip()
+    _, sep, value = stripped.partition(": ")
+    candidate = value.strip() if sep else stripped
+    return candidate if candidate.startswith('"') else None
+
+
 def verify_tabby(path: pathlib.Path, model: Model) -> list[Check]:
     text = path.read_text(encoding="utf-8")
     entries = len([ln for ln in text.splitlines() if ln.startswith("  - id: ")])
     if entries != len(model.hosts):
         return [Check("tabby: entry count", False, f"file {entries} vs model {len(model.hosts)}")]
 
-    unbalanced = [ln for ln in text.splitlines() if ln.count('"') % 2]
-    if unbalanced:
-        return [Check("tabby: quote balance", False, f"{len(unbalanced)} lines have unbalanced quotes")]
+    # Counting quotes per line looked like a balance check but was a heuristic, and a wrong
+    # one: the writer JSON-escapes values, so a password containing a double quote emits a
+    # legitimate \" and an odd quote count. On a real 213-host export that reported three
+    # false failures. Every scalar this writer emits is JSON, so validate it as JSON instead
+    # of guessing - that catches genuinely unterminated strings and nothing else.
+    malformed = []
+    for line in text.splitlines():
+        scalar = _quoted_scalar(line)
+        if scalar is None:
+            continue
+        try:
+            json.loads(scalar)
+        except ValueError:
+            malformed.append(line.strip()[:60])
+    if malformed:
+        return [
+            Check("tabby: quoted scalars", False, f"{len(malformed)} malformed: {'; '.join(malformed[:3])}")
+        ]
 
     return [
-        Check("tabby: structural check", True, f"{entries} profiles, quotes balanced"),
+        Check("tabby: structural check", True, f"{entries} profiles, all quoted scalars parse"),
         Check("tabby: round-trip import", None, "not verified - requires importing into a real Tabby"),
     ]
 
