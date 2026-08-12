@@ -23,6 +23,22 @@ The tool does not run on Windows. Three defects, in descending severity:
    directly. On Windows the path is frequently `C:\Users\First Last\...`; an unquoted space
    breaks the directive.
 
+4. **Every output file is newline-translated on Windows, corrupting some of them.**
+   `cli.py::_write_private` calls `path.write_text(content, encoding="utf-8")`. `write_text`
+   defaults to `newline=None`, which translates every `\n` to `os.linesep` — `\r\n` on Windows.
+   Consequences, in descending severity:
+
+   - **Private keys become CRLF PEM.** OpenSSH is strict about private key framing; this is
+     the difference between an export that works and one that produces unusable keys.
+   - **`hosts.csv` is doubly translated.** `csv.writer` already emits `\r\n`, so the extra
+     translation yields `\r\r\n` and a malformed file.
+   - `sshconfig` and `known_hosts` become CRLF. Windows OpenSSH mostly tolerates this, but
+     the files are also likely to be copied to a POSIX host.
+
+   This defect was found while checking the environment for the plan, not from the earlier
+   read-through — it is invisible on Linux, where `os.linesep` is already `\n`, so no amount
+   of testing on the development platform would surface it.
+
 Additionally, README.md:146 and CLAUDE.md both claim the "Windows branch follows platform
 conventions but has not been exercised on real hardware". This is inaccurate: there is no
 Windows branch to exercise. The documentation must be corrected regardless of the code.
@@ -179,6 +195,18 @@ If `icacls` fails or is missing, the failure is reported — never swallowed:
 This follows the repository's existing stance that a silently wrong result is worse than a loud
 failure.
 
+### Newline handling
+
+`_write_private` passes `newline="\n"` to `write_text`, disabling translation so file content
+is written verbatim.
+
+This satisfies the POSIX invariant exactly rather than approximately: on Linux and macOS
+`os.linesep` is already `\n`, so `newline=None` and `newline="\n"` produce identical bytes. The
+change is therefore a no-op on the verified platforms and a correctness fix on Windows.
+
+Writers keep emitting `\n` (and `csv.writer` keeps emitting its own `\r\n`); the fix belongs at
+the single point where bytes reach the disk, not spread across six writers.
+
 ### IdentityFile quoting
 
 `openssh.py` quotes the path only when it contains whitespace. Quoting unconditionally would
@@ -218,8 +246,20 @@ Runnable on the Linux development machine:
 
 - `ruff check` and module import on all touched files.
 - New `tests/` — the repository's first — covering only platform-independent pure logic:
-  blob encoding disambiguation given synthetic bytes, `icacls` argument construction, and the
-  quoting predicate including its no-change-without-spaces guarantee.
+  blob encoding disambiguation given synthetic bytes, `icacls` argument construction, the
+  quoting predicate including its no-change-without-spaces guarantee, and verbatim newline
+  writing.
+
+  **Written against stdlib `unittest`, not pytest.** The development machine has no pytest, no
+  ruff and no nix, and neither `pynacl` nor `ccl_chromium_reader` is importable there — but
+  `localkey`, `model` and every writer import with stdlib alone, which is what makes this
+  possible. The payoff is larger than avoiding an install: the same suite runs unmodified on
+  the Windows test machine with no setup, so the pure Windows logic gets exercised natively on
+  Windows rather than only in simulation from Linux.
+
+  Tests that need a real Windows API call are guarded with
+  `@unittest.skipUnless(sys.platform == "win32", ...)`, so they are reported as skipped on
+  Linux and actually run for the user.
 - A synthetic `Model` written through `OpenSshWriter`, then read back with a real `ssh -G`
   invocation. This exercises the quoting change end to end, since `ssh` is present locally.
   Note the development machine has no Termius data and no `secret-tool`, so a real-data export
