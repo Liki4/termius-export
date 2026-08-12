@@ -89,5 +89,27 @@ class LiveCredentialManagerTests(unittest.TestCase):
         self.assertIn("Credential Manager", source)
 
 
+class NotFoundMessageTests(unittest.TestCase):
+    def test_windows_message_does_not_mention_linux_package_managers(self):
+        message = localkey._not_found_message(["Windows Credential Manager"], platform="win32")
+        for noise in ("dnf", "apt", "pacman", "secret-tool", "libsecret"):
+            self.assertNotIn(noise, message)
+
+    def test_windows_message_points_at_credential_manager(self):
+        message = localkey._not_found_message(["Windows Credential Manager"], platform="win32")
+        self.assertIn("cmdkey", message)
+        self.assertIn("--local-key-file", message)
+
+    def test_windows_message_lists_the_target_form(self):
+        message = localkey._not_found_message(["Windows Credential Manager"], platform="win32")
+        self.assertIn("Termius/localKey", message)
+
+    def test_posix_message_is_unchanged(self):
+        message = localkey._not_found_message(["secret-tool"], platform="linux")
+        self.assertIn("secret-tool", message)
+        self.assertIn("termius-app", message)
+        self.assertIn("--local-key-file", message)
+
+
 if __name__ == "__main__":
     unittest.main()

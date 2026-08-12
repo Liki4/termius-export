@@ -180,6 +180,50 @@ def _available_backends() -> list[tuple[str, object]]:
     return backends
 
 
+def _not_found_message(backend_names: list[str], platform: str | None = None) -> str:
+    """The "a backend works but holds no key" message, per platform.
+
+    The POSIX text is kept verbatim: Linux is the verified platform and macOS is validated on
+    a separate track, so neither may drift as part of a Windows change.
+    """
+    platform = sys.platform if platform is None else platform
+    tried = ", ".join(backend_names)
+
+    if platform == "win32":
+        targets = ", ".join(f"{s}/{ACCOUNT}" for s in CANDIDATE_SERVICES)
+        return (
+            f"A credential backend is available ({tried}) but it holds no Termius localKey.\n"
+            f"Tried target names: {targets}.\n"
+            "\n"
+            "Most likely causes:\n"
+            "  - Termius has never been launched on this machine (the key is created on first run)\n"
+            "  - the export is running as a different Windows user than the one that runs Termius\n"
+            "  - Termius stores it under a target name not in the list above\n"
+            "\n"
+            "Check by hand, in PowerShell:\n"
+            "  cmdkey /list | Select-String termius\n"
+            "\n"
+            "If the target name differs from those tried above, please report it. Otherwise\n"
+            "read the key out yourself and pass it in via --local-key-file."
+        )
+
+    return (
+        f"A keyring client is available ({tried}) but it holds no Termius localKey.\n"
+        f"Tried service names: {', '.join(CANDIDATE_SERVICES)} with account={ACCOUNT}.\n"
+        "\n"
+        "Most likely causes:\n"
+        "  - Termius has never been launched on this machine (the key is created on first run)\n"
+        "  - the keyring is locked; unlock it and retry\n"
+        "  - Termius stores it under a service name not in the list above\n"
+        "\n"
+        "Check by hand:\n"
+        "  secret-tool lookup service termius-app account localKey        # Linux\n"
+        "  security find-generic-password -s Termius -a localKey -w       # macOS\n"
+        "\n"
+        "Then pass the value via --local-key-file."
+    )
+
+
 def find_local_key() -> tuple[str, str]:
     """Return ``(key_base64, source_description)``; raise LocalKeyNotFound if unavailable.
 
@@ -216,22 +260,7 @@ def find_local_key() -> tuple[str, str]:
                     detail += f", blob encoding={encoding}"
                 return value, detail + ")"
 
-    tried = ", ".join(name for name, _ in backends)
-    raise LocalKeyNotFound(
-        f"A keyring client is available ({tried}) but it holds no Termius localKey.\n"
-        f"Tried service names: {', '.join(CANDIDATE_SERVICES)} with account={ACCOUNT}.\n"
-        "\n"
-        "Most likely causes:\n"
-        "  - Termius has never been launched on this machine (the key is created on first run)\n"
-        "  - the keyring is locked; unlock it and retry\n"
-        "  - Termius stores it under a service name not in the list above\n"
-        "\n"
-        "Check by hand:\n"
-        "  secret-tool lookup service termius-app account localKey        # Linux\n"
-        "  security find-generic-password -s Termius -a localKey -w       # macOS\n"
-        "\n"
-        "Then pass the value via --local-key-file."
-    )
+    raise LocalKeyNotFound(_not_found_message([name for name, _ in backends]))
 
 
 def load_local_key(path: str | None) -> tuple[str, str]:
