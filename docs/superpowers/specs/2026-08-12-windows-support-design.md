@@ -198,6 +198,12 @@ current output byte-identical unless a path genuinely contains a space.
   passes, then updated to name the exact Windows version and install method tested, and the
   scope of what was exercised.
 
+The existing sentence bundles macOS and Windows together ("macOS and Windows branches follow
+platform conventions but have not been exercised"). Rewriting it must split the two rather than
+upgrade both: the Windows half becomes accurate for the first time, while **macOS keeps its
+current unverified status verbatim** — it is validated on a separate track and this change
+provides no evidence about it.
+
 ## Verification
 
 Split by what each side can actually falsify.
