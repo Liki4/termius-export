@@ -8,6 +8,7 @@ finds nothing — an easy trap.
 
 from __future__ import annotations
 
+import base64
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,42 @@ CANDIDATE_SERVICES = (
 
 ACCOUNT = "localKey"
 
+#: localKey is a NaCl secretbox key: base64 of exactly 32 bytes.
+LOCAL_KEY_BYTES = 32
+
+#: Which blob encoding actually worked, per service. Reported in the run summary so the first
+#: real Windows run measures this instead of leaving it an assumption.
+_LAST_BLOB_ENCODING: dict[str, str] = {}
+
 
 class LocalKeyNotFound(Exception):
     pass
+
+
+def _looks_like_local_key(value: str) -> bool:
+    try:
+        return len(base64.b64decode(value, validate=True)) == LOCAL_KEY_BYTES
+    except Exception:  # noqa: BLE001 - any decoding problem means "not a key"
+        return False
+
+
+def _decode_credential_blob(blob: bytes) -> tuple[str, str]:
+    """Decode a Windows CredentialBlob into ``(key, encoding_label)``.
+
+    The blob is raw bytes and Credential Manager declares no encoding. keytar writes UTF-8,
+    but that cannot be confirmed without a Windows machine, so rather than assume, candidate
+    encodings are disambiguated by the key's known shape - the same "use the known plaintext"
+    technique that produced the cipher format. The label is reported in the run summary, so
+    the first real Windows run turns this from an assumption into a measurement.
+    """
+    for label in ("utf-8", "utf-16-le"):
+        try:
+            candidate = blob.decode(label).strip()
+        except UnicodeDecodeError:
+            continue
+        if _looks_like_local_key(candidate):
+            return candidate, label
+    return blob.decode("utf-8", errors="replace").strip(), "utf-8 (unvalidated)"
 
 
 def _from_secret_tool(service: str) -> str | None:
