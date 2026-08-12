@@ -54,5 +54,40 @@ class DecodeCredentialBlobTests(unittest.TestCase):
         self.assertIn("unvalidated", encoding)
 
 
+from termius_export import localkey
+
+
+class ImportSafetyTests(unittest.TestCase):
+    def test_backend_exists(self):
+        # ctypes.wintypes raises on non-Windows, so it must never be imported at module
+        # scope. If importing this module fails on Linux, the Windows code leaked its guard.
+        self.assertTrue(hasattr(localkey, "_from_credential_manager"))
+
+    def test_credential_backend_returns_none_off_windows(self):
+        if sys.platform == "win32":
+            self.skipTest("Windows has a real Credential Manager")
+        self.assertIsNone(localkey._from_credential_manager("Termius"))
+
+    def test_candidate_services_still_contains_the_measured_windows_service(self):
+        # Measured on a real Windows install: target=Termius/localKey
+        self.assertIn("Termius", localkey.CANDIDATE_SERVICES)
+
+
+@unittest.skipUnless(sys.platform == "win32", "requires Windows Credential Manager")
+class LiveCredentialManagerTests(unittest.TestCase):
+    def test_reads_the_termius_local_key(self):
+        value = localkey._from_credential_manager("Termius")
+        self.assertIsNotNone(value, "no Termius/localKey credential found")
+        self.assertTrue(
+            _looks_like_local_key(value),
+            f"credential decoded to something that is not a 32-byte key: {len(value)} chars",
+        )
+
+    def test_find_local_key_reports_its_source(self):
+        key, source = localkey.find_local_key()
+        self.assertTrue(_looks_like_local_key(key))
+        self.assertIn("Credential Manager", source)
+
+
 if __name__ == "__main__":
     unittest.main()

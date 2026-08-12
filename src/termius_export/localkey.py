@@ -95,12 +95,88 @@ def _from_macos_keychain(service: str) -> str | None:
     return out.stdout.strip() or None
 
 
+def _from_credential_manager(service: str) -> str | None:
+    """Windows: read the generic credential keytar writes.
+
+    ``ctypes`` is used rather than a PowerShell subprocess because ``cmdkey`` cannot print a
+    credential blob - reading one needs ``CredReadW`` either way, and going through PowerShell
+    would mean compiling C# at runtime via ``Add-Type``: slow, frequently flagged by
+    antivirus, and blocked outright by some execution policies. The ``keyring`` package was
+    also rejected, since it would rewrite the Linux and macOS paths that are already verified.
+
+    Everything ctypes-related is imported inside this function on purpose: ``ctypes.wintypes``
+    raises on non-Windows, so importing it at module scope would break the module everywhere
+    else.
+    """
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    import ctypes.wintypes
+
+    CRED_TYPE_GENERIC = 1
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", ctypes.wintypes.DWORD),
+            ("dwHighDateTime", ctypes.wintypes.DWORD),
+        ]
+
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", ctypes.wintypes.DWORD),
+            ("Type", ctypes.wintypes.DWORD),
+            ("TargetName", ctypes.wintypes.LPWSTR),
+            ("Comment", ctypes.wintypes.LPWSTR),
+            ("LastWritten", FILETIME),
+            ("CredentialBlobSize", ctypes.wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_char)),
+            ("Persist", ctypes.wintypes.DWORD),
+            ("AttributeCount", ctypes.wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", ctypes.wintypes.LPWSTR),
+            ("UserName", ctypes.wintypes.LPWSTR),
+        ]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.CredReadW.argtypes = [
+        ctypes.wintypes.LPCWSTR,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(CREDENTIAL)),
+    ]
+    advapi32.CredReadW.restype = ctypes.wintypes.BOOL
+    advapi32.CredFree.argtypes = [ctypes.c_void_p]
+    advapi32.CredFree.restype = None
+
+    # keytar's target format. Measured on a real install: target=Termius/localKey.
+    target = f"{service}/{ACCOUNT}"
+    pcred = ctypes.POINTER(CREDENTIAL)()
+    if not advapi32.CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(pcred)):
+        return None
+
+    try:
+        cred = pcred.contents
+        blob = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+    finally:
+        advapi32.CredFree(pcred)
+
+    value, encoding = _decode_credential_blob(blob)
+    if not value:
+        return None
+    _LAST_BLOB_ENCODING[service] = encoding
+    return value
+
+
 def _available_backends() -> list[tuple[str, object]]:
     backends: list[tuple[str, object]] = []
     if shutil.which("secret-tool"):
         backends.append(("secret-tool", _from_secret_tool))
     if sys.platform == "darwin" and shutil.which("security"):
         backends.append(("macOS keychain", _from_macos_keychain))
+    if sys.platform == "win32":
+        # advapi32 ships with Windows, so this backend is always available.
+        backends.append(("Windows Credential Manager", _from_credential_manager))
     return backends
 
 
@@ -134,7 +210,11 @@ def find_local_key() -> tuple[str, str]:
         for backend, fn in backends:
             value = fn(service)
             if value:
-                return value, f"{backend} (service={service}, account={ACCOUNT})"
+                detail = f"{backend} (service={service}, account={ACCOUNT}"
+                encoding = _LAST_BLOB_ENCODING.get(service)
+                if encoding:
+                    detail += f", blob encoding={encoding}"
+                return value, detail + ")"
 
     tried = ", ".join(name for name, _ in backends)
     raise LocalKeyNotFound(
