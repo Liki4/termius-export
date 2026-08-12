@@ -247,6 +247,20 @@ Labelling this honestly is non-negotiable. `verify.py` reports Tabby's round-tri
 | known_hosts | `ssh-keygen -F <host> -f <file>` per entry — OpenSSH's own known_hosts parser |
 | Private keys | `ssh-keygen -l -f` on every emitted key, confirming they are real, parseable keys |
 
+Two traps in that table, both found by a 213-host real-world export rather than by reading:
+
+- **`ssh -G` lower-cases the hostname.** Comparing it case-sensitively against the model
+  reports every host with an uppercase address as a mismatch. DNS is case-insensitive.
+- **`ssh-keygen -l -f <private>` silently falls back to `<private>.pub`.** Any test of the
+  private-key path must delete the `.pub` first, or it proves nothing. This is how the
+  passphrase-protected PKCS#1 PEM case stayed hidden: those keys encrypt the public modulus
+  too, so without the `.pub` ssh-keygen reports `is not a key file` — the same message as for
+  genuine corruption. `_is_encrypted_pem` separates them, and such keys are reported as
+  **skipped**, never as passed.
+
+A check that reports a false failure is worse than no check: it teaches people to ignore the
+whole verification pass.
+
 The CLI exits non-zero if any check fails.
 
 ---

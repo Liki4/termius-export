@@ -162,6 +162,10 @@ Other outputs:
   conventions but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
+- Passphrase-protected **PKCS#1 PEM** keys (`BEGIN RSA PRIVATE KEY` with `Proc-Type:
+  4,ENCRYPTED`) are exported normally but **cannot be self-verified**: that format encrypts the
+  public modulus too, so `ssh-keygen` cannot fingerprint them without the passphrase. They are
+  reported as skipped, never as passed. Keys in the modern OpenSSH format are unaffected
 
 ## Documentation
 

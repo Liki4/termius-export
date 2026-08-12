@@ -245,6 +245,29 @@ VERIFIERS = {
 }
 
 
+#: Old PKCS#1 PEM keys carry this when passphrase-protected.
+_PEM_ENCRYPTED_MARKER = "Proc-Type: 4,ENCRYPTED"
+
+
+def _is_encrypted_pem(path: pathlib.Path) -> bool:
+    """Whether this is a passphrase-protected PKCS#1 PEM key.
+
+    Such a key encrypts its whole body, public modulus included, so ssh-keygen cannot derive
+    a fingerprint without the passphrase and reports "<file> is not a key file" - which by
+    exit status is indistinguishable from genuine corruption. The modern OPENSSH format keeps
+    the public half in the clear, so it is unaffected.
+
+    Feeding the passphrase to ssh-keygen would make these checkable, but Termius only has it
+    when --no-secrets is off, and passing it on argv would expose it in the process table.
+    Reporting honestly is worth more than the extra coverage.
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:200]
+    except OSError:
+        return False
+    return _PEM_ENCRYPTED_MARKER in head
+
+
 def verify_key_files(out_dir: pathlib.Path, model: Model) -> list[Check]:
     """Confirm with ssh-keygen that the exported private keys really parse."""
     if not shutil.which("ssh-keygen"):
@@ -258,14 +281,34 @@ def verify_key_files(out_dir: pathlib.Path, model: Model) -> list[Check]:
     if not files:
         return [Check("keys: ssh-keygen parse", None, "no private keys exported")]
 
+    locked = [f for f in files if _is_encrypted_pem(f)]
+    checkable = [f for f in files if f not in locked]
+
+    checks: list[Check] = []
+    if locked:
+        names = ", ".join(sorted(f.name for f in locked)[:5])
+        checks.append(
+            Check(
+                "keys: encrypted PEM fingerprint",
+                None,
+                f"{len(locked)} passphrase-protected PKCS#1 PEM key(s) cannot be fingerprinted "
+                f"without the passphrase, so they were not checked: {names}",
+            )
+        )
+
+    if not checkable:
+        return checks
+
     bad = []
-    for f in files:
+    for f in checkable:
         r = _run(["ssh-keygen", "-l", "-f", str(f)], stdin=subprocess.DEVNULL)
         if "SHA256" not in r.stdout:
             bad.append(f.name)
     if bad:
-        return [Check("keys: ssh-keygen parse", False, f"unparseable: {', '.join(bad[:5])}")]
-    return [Check("keys: ssh-keygen parse", True, f"all {len(files)} private keys parse")]
+        checks.append(Check("keys: ssh-keygen parse", False, f"unparseable: {', '.join(bad[:5])}"))
+    else:
+        checks.append(Check("keys: ssh-keygen parse", True, f"all {len(checkable)} private keys parse"))
+    return checks
 
 
 def verify_outputs(out_dir: pathlib.Path, model: Model) -> list[Check]:
