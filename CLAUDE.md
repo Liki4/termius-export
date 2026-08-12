@@ -346,8 +346,10 @@ whole project, and one that would keep breaking as Chromium evolves.
 - Verified on Linux (snap install) and on Windows. The Windows evidence is a real 213-host /
   22-key / 264-known_hosts profile on a Chinese-localized Windows with Python 3.12: `localKey`
   read from Credential Manager (blob encoding measured as UTF-8), all six formats emitted, and
-  every self-check passing with no hardening warnings. The macOS path/keyring branch follows
-  platform conventions but has not been exercised on real hardware
+  every self-check passing with no hardening warnings. The resulting ACL was inspected rather
+  than assumed: `icacls out\keys` showed a single ACE, `<HOST>\<user>:(OI)(CI)(F)` — inherited
+  entries stripped, no `Authenticated Users` or `BUILTIN\Users`. The macOS path/keyring branch
+  follows platform conventions but has not been exercised on real hardware
 - The localization matters to that evidence: it is what exposed the `icacls`-principal and
   GBK-decoding traps. A run on an English Windows would not have caught either
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
