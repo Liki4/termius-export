@@ -1,0 +1,31 @@
+# Export output contains plaintext private keys, passwords and passphrases.
+# Never commit it. Patterns are anchored on purpose: an unanchored `localkey*`
+# would also match src/termius_export/localkey.py, which is source code.
+/out/
+/out-*/
+**/keys/
+**/keys-unlinked/
+/localkey.txt
+/localkey*.txt
+/sshconfig
+/export.json
+/hosts.csv
+/tabby-profiles.yaml
+*.pem
+
+# Backup directories hold the full credential store too
+/termius-backup*/
+
+# Python build artifacts (a stray `pip install .` leaves stale copies of the source here)
+/build/
+/dist/
+*.egg-info/
+
+# Tooling
+.direnv/
+.venv/
+__pycache__/
+*.py[co]
+.ruff_cache/
+/result
+/result-*

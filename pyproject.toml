@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "termius-export"
+version = "0.1.0"
+description = "Decrypt Termius's local data offline and convert your hosts, SSH keys, port forwards and proxies into OpenSSH, Tabby, Termix, CSV or JSON. Termius never needs to run."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["termius", "ssh", "migration", "indexeddb", "export"]
+
+dependencies = [
+  "PyNaCl>=1.5",
+  # Chromium IndexedDB / V8 structured-clone parsing. GitHub-only, not on PyPI.
+  "ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader",
+]
+
+[project.scripts]
+termius-export = "termius_export.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/y01and3/termius-export"
+Issues = "https://github.com/y01and3/termius-export/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
