@@ -20,6 +20,23 @@ def _proxy_command(proxy) -> str:
     return f"ncat --proxy {proxy.host}:{proxy.port} --proxy-type {kind} %h %p"
 
 
+def _quote_path(path: str) -> str:
+    """Double-quote an ssh_config path argument, but only when it needs it.
+
+    An unquoted path containing a space is not merely wrong for that host - ssh rejects the
+    whole file: "keyword identityfile extra arguments at end of line". Every host in the
+    export becomes unusable. Quoting fixes it; ssh resolves the quoted form with the space
+    preserved.
+
+    Quoting unconditionally would also be correct, but it would change the generated file for
+    every existing Linux user for no benefit, so quote exactly the paths that need it.
+
+    A path containing a literal double quote is not representable in ssh_config and is not
+    handled: it is an illegal character in Windows paths and vanishingly rare on POSIX.
+    """
+    return f'"{path}"' if any(c.isspace() for c in path) else path
+
+
 class OpenSshWriter:
     name = "openssh"
     title = "OpenSSH ~/.ssh/config"
@@ -45,7 +62,7 @@ class OpenSshWriter:
 
             key_path = ctx.key_path(h.key)
             if key_path:
-                lines.append(f"    IdentityFile {key_path}")
+                lines.append(f"    IdentityFile {_quote_path(key_path)}")
                 if h.key.has_passphrase:
                     lines.append("    # this key is passphrase-protected")
 
