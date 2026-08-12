@@ -6,6 +6,7 @@ import os
 import pathlib
 import sys
 
+from . import fsperm
 from . import writers as writers_mod
 from .crypto import Decryptor, UnknownCipherVersion
 from .localkey import LocalKeyNotFound, load_local_key
@@ -74,11 +75,10 @@ def _add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return p
 
 
-def _write_private(path: pathlib.Path, content: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    path.write_text(content, encoding="utf-8")
-    path.chmod(mode)
+#: Moved to fsperm, which owns every platform-dependent filesystem concern: POSIX modes do not
+#: exist on Windows and write_text translates newlines there. Aliased rather than renamed at
+#: each call site to keep this change small.
+_write_private = fsperm.write_private
 
 
 def _dump_keys(model: Model, out_dir: pathlib.Path) -> dict[str, str]:
@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = pathlib.Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_dir.chmod(0o700)
+    fsperm.secure_dir(out_dir)
 
     key_paths = {} if args.no_keys else _dump_keys(model, out_dir)
     ctx = WriteContext(
@@ -174,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         "stats": model.stats(),
         "written": written,
         "secrets_included": not args.no_secrets,
+        "warnings": fsperm.warnings(),
         "verification": [
             {
                 "check": c.name,
@@ -214,6 +215,11 @@ def _print_human(s: dict) -> None:
     print("files:")
     for w in s["written"]:
         print(f"  {w['file']:<24} [{w['verified']}]")
+    if s.get("warnings"):
+        print()
+        print("warnings:")
+        for w in s["warnings"]:
+            print(f"  [WARN] {w}")
     if s["verification"]:
         print()
         print("verification:")
