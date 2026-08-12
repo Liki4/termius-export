@@ -42,6 +42,7 @@ verify.py     read outputs back, compare against the model
 | `source.py` | Read Chromium IndexedDB, deduplicate records |
 | `crypto.py` | XSalsa20-Poly1305 decryption, version-header validation |
 | `localkey.py` | Fetch `localKey` from the platform keyring |
+| `fsperm.py` | Platform-dependent filesystem writes and permission hardening |
 | `normalize.py` | Resolve Termius entity references, produce a `Model` |
 | `model.py` | Dataclasses for the intermediate model |
 | `writers/` | One writer per target client |
@@ -73,9 +74,9 @@ Two rules enforced in `crypto.py`:
 
 ---
 
-## Three traps
+## Four traps
 
-All three were hit during development. Don't rediscover them.
+All four were hit during development. Don't rediscover them.
 
 ### 1. LevelDB holds multiple generations of the same record
 
@@ -124,6 +125,55 @@ security find-generic-password -s Termius -a localKey -w       # macOS
 ```
 
 ---
+
+### 4. Windows needs three separate things, and two of them fail silently
+
+Measured on a real install, not assumed:
+
+- **The keyring service name is `Termius`**, and Credential Manager's target is
+  `Termius/localKey` — keytar's `{service}/{account}` form. `CANDIDATE_SERVICES` already
+  contained `Termius`, so only a backend was needed, not a new service name.
+- **`os.chmod` is a no-op on Windows.** It can only toggle the read-only attribute, so `0600`
+  on a private key silently protects nothing. `fsperm.py` uses `icacls` with the user's
+  **SID** — well-known principal names are localized, so an English literal fails on a
+  non-English Windows.
+- **`Path.write_text` translates newlines.** The default `newline=None` turns every `\n` into
+  `os.linesep`, producing CRLF private keys and, because `csv.writer` already emits `\r\n`, a
+  `hosts.csv` full of `\r\r\n`. `fsperm.write_private` passes `newline="\n"`.
+
+The last two are invisible on Linux, where `chmod` works and `os.linesep` is already `\n`.
+Testing on the development platform cannot surface them.
+
+One more, measured with the real parser: an **unquoted `IdentityFile` path containing a space
+makes `ssh` reject the entire config file** (`keyword identityfile extra arguments at end of
+line`), not merely that one host. `_quote_path` in `writers/openssh.py` quotes exactly those
+paths, and leaves every space-free path byte-identical.
+
+**`Local State`'s `os_crypt.encrypted_key` is not the localKey.** It base64-decodes to a
+`DPAPI` prefix and is Chromium's own cookie / Local-Storage key, present in every Electron
+app. Do not investigate it again.
+
+---
+
+## Tests
+
+`tests/` uses the standard library's `unittest`, deliberately — not pytest.
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+Two reasons. The suite needs no install, and `localkey`, `model`, `fsperm` and every writer
+import with stdlib alone, so it runs on a bare Python without `pynacl` or
+`ccl_chromium_reader`. More importantly it runs unmodified **on Windows**, so the pure Windows
+logic is exercised natively rather than only simulated from Linux.
+
+Tests requiring a real Windows API call are guarded with
+`@unittest.skipUnless(sys.platform == "win32", ...)`.
+
+**Never import `cli`, `crypto` or `source` from a test** — they pull `pynacl` /
+`ccl_chromium_reader` and will fail to import on a bare checkout. This is why
+`write_private` lives in `fsperm` rather than `cli`.
 
 ## Writer plugin interface
 
@@ -192,7 +242,9 @@ The CLI exits non-zero if any check fails.
 
 ## Security posture
 
-- Output directory `0700`, private keys `0600`, process `umask 077`
+- Output directory `0700`, private keys `0600`, process `umask 077` — **on POSIX**. Windows
+  gets an equivalent via `icacls`; see trap 4. Everything goes through `fsperm`, so the
+  platform difference lives in one file rather than being scattered through `cli.py`
 - **No extra plaintext intermediate files.** Decrypted data only ever exists in memory
 - `--no-secrets` exports structure without passwords or passphrases
 - **Orphaned keys are still written out** to `keys-unlinked/`, never silently dropped. Its
@@ -257,8 +309,8 @@ whole project, and one that would keep breaking as Chromium evolves.
 
 ## Known limitations
 
-- Fully verified only on Linux (snap install). The macOS and Windows path/keyring branches follow
-  platform conventions but have not been exercised on real hardware
+- Verified on Linux (snap install) and Windows. The macOS path/keyring branch follows platform
+  conventions but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated
 - The Tabby writer has not been round-trip verified; see the `verified` table above

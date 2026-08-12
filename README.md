@@ -89,6 +89,16 @@ The service name is `termius-app` for snap installs and `Termius` on macOS — T
 executable name, which is why looking up "Termius" on a snap install finds nothing. Any keyring
 browser (Seahorse, KWalletManager) can show the entry too.
 
+On Windows the key lives in Credential Manager under the target `Termius/localKey`. The tool
+reads it directly via `CredReadW`; to confirm the entry exists:
+
+```powershell
+cmdkey /list | Select-String termius
+```
+
+`cmdkey` lists targets but never prints the blob, so there is no one-line way to dump the key
+by hand. If the automatic read fails, report the target name it shows.
+
 `localkey.txt` is the master decryption key. Delete it once the export is done.
 
 ## After the export
@@ -136,6 +146,10 @@ Other outputs:
 ## Security
 
 - Output directory `0700`, private keys `0600`, process `umask 077`
+- On Windows POSIX modes do not apply: `os.chmod` there can only toggle the read-only
+  attribute, so a `0600` private key would be protected by nothing. The output directory is
+  restricted with `icacls` to the current user's SID and files inherit it. If that fails the
+  run warns rather than letting you assume the keys are protected
 - Decrypted data exists only in memory; no extra plaintext intermediate files are written
 - The tool is **read-only** and never modifies or deletes Termius data
 - Output contains plaintext credentials. `.gitignore` covers every output path, but handle the
@@ -143,8 +157,8 @@ Other outputs:
 
 ## Limitations
 
-- Fully verified only on Linux (snap install). macOS and Windows branches follow platform
-  conventions but have not been exercised on real hardware
+- Verified on Linux (snap install) and Windows. The macOS branch follows platform conventions
+  but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
 
