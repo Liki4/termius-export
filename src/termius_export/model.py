@@ -6,6 +6,7 @@ new client means adding one writer, not re-reading Termius's internals.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 
@@ -115,6 +116,29 @@ class Model:
             "hosts_with_tags": sum(1 for h in self.hosts if h.tags),
             "known_hosts": len(self.known_hosts),
         }
+
+
+def expand_packed_ipv4(value: str) -> str:
+    """Expand a packed 32-bit IPv4 address into dotted-quad form, leaving anything else alone.
+
+    Termius stores some addresses as the integer form: ``3221226008`` rather than
+    ``192.0.2.24``. ssh copes, because ``inet_aton`` accepts a bare 32-bit number, so the
+    generated sshconfig works and ``ssh -G`` canonicalises it back to dotted-quad. The other
+    writers feed clients that do not cope - Node's ``net.connect`` treats ``"3221226008"`` as a
+    name to resolve, and the lookup fails - so Tabby, Termix, CSV and JSON would all carry an
+    address their consumer cannot use.
+
+    The expansion is lossless and unambiguous: RFC 1123 forbids an all-numeric top-level
+    label, so an all-digit address cannot be a legal DNS name. Values that cannot be a packed
+    IPv4 - out of range, signed, non-ASCII digits - are returned untouched rather than
+    mangled.
+    """
+    if not (value.isascii() and value.isdigit()):
+        return value
+    packed = int(value)
+    if packed > 0xFFFFFFFF:
+        return value
+    return str(ipaddress.IPv4Address(packed))
 
 
 _SLUG_STRIP = re.compile(r"[^\w.@-]+")

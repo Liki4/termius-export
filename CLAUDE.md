@@ -261,6 +261,15 @@ Two traps in that table, both found by a 213-host real-world export rather than 
 A check that reports a false failure is worse than no check: it teaches people to ignore the
 whole verification pass.
 
+**Not every mismatch is a false alarm, though.** The same export reported two hosts whose
+address was `3221226008` rather than `192.0.2.24` — Termius stores some addresses as a packed
+32-bit integer. ssh coped, because `inet_aton` accepts a bare 32-bit number, so the sshconfig
+worked and only the readback disagreed. But the packed form would have reached Tabby, Termix,
+CSV and JSON, whose consumers do *not* cope: Node's `net.connect` treats `"3221226008"` as a
+name to resolve and the lookup fails. `model.py::expand_packed_ipv4` normalises it. The
+lesson is that a readback mismatch is a symptom, not a diagnosis — chase it to the cause
+before deciding which side is wrong.
+
 The CLI exits non-zero if any check fails.
 
 ---
