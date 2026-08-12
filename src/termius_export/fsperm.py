@@ -82,6 +82,11 @@ def _current_user_sid() -> str | None:
             ["whoami", "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
+            # Unlike verify.py's helpers, whoami and icacls are Windows console programs:
+            # they emit the console/ANSI codepage, not UTF-8, so the locale default is the
+            # right codec here. errors="replace" only stops a non-ASCII user name from
+            # raising - the SID field this parses is pure ASCII either way.
+            errors="replace",
             timeout=15,
             check=False,
         )
@@ -112,6 +117,8 @@ def _harden_dir(path: pathlib.Path) -> None:
             _icacls_args(path, sid),
             capture_output=True,
             text=True,
+            # icacls messages are localized and in the console codepage; see _current_user_sid.
+            errors="replace",
             timeout=60,
             check=False,
         )

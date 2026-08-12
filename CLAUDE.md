@@ -126,7 +126,7 @@ security find-generic-password -s Termius -a localKey -w       # macOS
 
 ---
 
-### 4. Windows needs three separate things, and two of them fail silently
+### 4. Windows needs four separate things, and none of them show up on Linux
 
 Measured on a real install, not assumed:
 
@@ -140,9 +140,20 @@ Measured on a real install, not assumed:
 - **`Path.write_text` translates newlines.** The default `newline=None` turns every `\n` into
   `os.linesep`, producing CRLF private keys and, because `csv.writer` already emits `\r\n`, a
   `hosts.csv` full of `\r\r\n`. `fsperm.write_private` passes `newline="\n"`.
+- **`subprocess(text=True)` decodes with the locale ANSI codepage, not UTF-8.** On a Chinese
+  Windows that is GBK. `slug()` keeps CJK characters — Python's `\w` is Unicode-aware — so a
+  Chinese Termius label becomes a Chinese ssh alias, `ssh -G` echoes it back as the UTF-8
+  bytes we wrote, and GBK cannot decode them. The failure is nasty: `UnicodeDecodeError` is
+  raised *inside subprocess's reader thread*, so `stdout` is silently left as `None` and the
+  real traceback is `'NoneType' object has no attribute 'splitlines'` somewhere unrelated.
 
-The last two are invisible on Linux, where `chmod` works and `os.linesep` is already `\n`.
-Testing on the development platform cannot surface them.
+  `verify.py::_run` decodes as UTF-8 with `errors="replace"`, matching what we wrote.
+  `fsperm`'s calls deliberately do **not**: `whoami` and `icacls` are Windows console programs
+  that emit the console codepage, so they keep the locale default and only add
+  `errors="replace"`.
+
+The last three are invisible on Linux, where `chmod` works, `os.linesep` is already `\n`, and
+the locale is UTF-8. Testing on the development platform cannot surface them.
 
 One more, measured with the real parser: an **unquoted `IdentityFile` path containing a space
 makes `ssh` reject the entire config file** (`keyword identityfile extra arguments at end of
@@ -309,7 +320,9 @@ whole project, and one that would keep breaking as Chromium evolves.
 
 ## Known limitations
 
-- Verified on Linux (snap install) and Windows. The macOS path/keyring branch follows platform
+- Fully verified on Linux (snap install). Windows support is implemented against a real
+  install and its verification pass is still in progress — do not upgrade this line until a
+  clean end-to-end run is confirmed. The macOS path/keyring branch follows platform
   conventions but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated

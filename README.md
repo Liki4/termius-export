@@ -157,8 +157,9 @@ Other outputs:
 
 ## Limitations
 
-- Verified on Linux (snap install) and Windows. The macOS branch follows platform conventions
-  but has not been exercised on real hardware
+- Fully verified on Linux (snap install). Windows support is implemented against a real
+  install and is still being verified end to end. The macOS branch follows platform
+  conventions but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
 

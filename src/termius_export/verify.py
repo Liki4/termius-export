@@ -25,8 +25,32 @@ class Check:
     detail: str = ""
 
 
-def _ssh_config_value(out: str, field: str) -> str:
-    for line in out.splitlines():
+def _run(args: list[str], *, check: bool = False, timeout: int = 30, stdin=None):
+    """Run a helper tool and decode its output as UTF-8.
+
+    ``text=True`` alone decodes with the locale ANSI codepage. On a Chinese Windows that is
+    GBK, and since this project writes its config files as UTF-8 and ssh echoes their content
+    back verbatim, a host alias with non-ASCII characters raised UnicodeDecodeError *inside
+    subprocess's reader thread*. The thread died, ``stdout`` stayed None, and the export
+    crashed during verification - after the files had already been written.
+
+    So: decode as UTF-8, matching what we wrote, and never fail on an undecodable byte. On a
+    UTF-8 POSIX locale this is a no-op.
+    """
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=check,
+        timeout=timeout,
+        stdin=stdin,
+    )
+
+
+def _ssh_config_value(out: str | None, field: str) -> str:
+    for line in (out or "").splitlines():
         if line.startswith(field + " "):
             return line[len(field) + 1 :].strip()
     return ""
@@ -39,13 +63,7 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
         return [Check("openssh: ssh -G parse", None, "no hosts to verify")]
 
     try:
-        subprocess.run(
-            ["ssh", "-G", "-F", str(path), model.hosts[0].alias],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
+        _run(["ssh", "-G", "-F", str(path), model.hosts[0].alias], check=True)
     except subprocess.CalledProcessError as exc:
         first = (exc.stderr or "").strip().splitlines()
         return [Check("openssh: ssh -G parse", False, first[0] if first else "ssh rejected the config")]
@@ -56,13 +74,7 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
     for h in model.hosts:
         if not h.address:
             continue
-        out = subprocess.run(
-            ["ssh", "-G", "-F", str(path), h.alias],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        ).stdout
+        out = _run(["ssh", "-G", "-F", str(path), h.alias]).stdout
         if _ssh_config_value(out, "hostname") != h.address:
             mismatches.append(f"{h.alias}: hostname")
         elif _ssh_config_value(out, "port") != str(h.port):
@@ -183,13 +195,7 @@ def verify_known_hosts(path: pathlib.Path, model: Model) -> list[Check]:
     missing = []
     for entry in model.known_hosts:
         first_host = entry.hostnames.split(",")[0]
-        r = subprocess.run(
-            ["ssh-keygen", "-F", first_host, "-f", str(path)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
+        r = _run(["ssh-keygen", "-F", first_host, "-f", str(path)])
         if r.returncode != 0:
             missing.append(first_host)
     if missing:
@@ -222,14 +228,7 @@ def verify_key_files(out_dir: pathlib.Path, model: Model) -> list[Check]:
 
     bad = []
     for f in files:
-        r = subprocess.run(
-            ["ssh-keygen", "-l", "-f", str(f)],
-            capture_output=True,
-            text=True,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            timeout=30,
-        )
+        r = _run(["ssh-keygen", "-l", "-f", str(f)], stdin=subprocess.DEVNULL)
         if "SHA256" not in r.stdout:
             bad.append(f.name)
     if bad:
