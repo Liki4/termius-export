@@ -157,9 +157,10 @@ Other outputs:
 
 ## Limitations
 
-- Fully verified on Linux (snap install). Windows support is implemented against a real
-  install and is still being verified end to end. The macOS branch follows platform
-  conventions but has not been exercised on real hardware
+- Verified on Linux (snap install) and on Windows. The Windows run was a real 213-host,
+  22-key profile on a Chinese-localized Windows with Python 3.12: `localKey` read from
+  Credential Manager, all six formats emitted, and every self-check passing. The macOS branch
+  follows platform conventions but has not been exercised on real hardware
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
 - Passphrase-protected **PKCS#1 PEM** keys (`BEGIN RSA PRIVATE KEY` with `Proc-Type:

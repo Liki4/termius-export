@@ -343,10 +343,13 @@ whole project, and one that would keep breaking as Chromium evolves.
 
 ## Known limitations
 
-- Fully verified on Linux (snap install). Windows support is implemented against a real
-  install and its verification pass is still in progress — do not upgrade this line until a
-  clean end-to-end run is confirmed. The macOS path/keyring branch follows platform
-  conventions but has not been exercised on real hardware
+- Verified on Linux (snap install) and on Windows. The Windows evidence is a real 213-host /
+  22-key / 264-known_hosts profile on a Chinese-localized Windows with Python 3.12: `localKey`
+  read from Credential Manager (blob encoding measured as UTF-8), all six formats emitted, and
+  every self-check passing with no hardening warnings. The macOS path/keyring branch follows
+  platform conventions but has not been exercised on real hardware
+- The localization matters to that evidence: it is what exposed the `icacls`-principal and
+  GBK-decoding traps. A run on an English Windows would not have caught either
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated
 - The Tabby writer has not been round-trip verified; see the `verified` table above
