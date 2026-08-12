@@ -149,3 +149,21 @@ def secure_file(path: str | pathlib.Path, mode: int) -> None:
     if IS_WINDOWS:
         return
     pathlib.Path(path).chmod(mode)
+
+
+def write_private(path: str | pathlib.Path, content: str, mode: int = 0o600) -> None:
+    """Write a file that may contain secrets, with its directory hardened first.
+
+    ``newline="\\n"`` disables translation. Without it ``write_text`` turns every ``\\n`` into
+    ``os.linesep``, which on Windows means CRLF private keys - OpenSSH rejects those - and a
+    ``hosts.csv`` of ``\\r\\r\\n``, since ``csv.writer`` already emits ``\\r\\n``. On POSIX
+    ``os.linesep`` is already ``\\n``, so this is a byte-level no-op there.
+
+    The parent is hardened *before* the file is written so that on Windows the new file
+    inherits the restrictive ACL rather than being created under the old one.
+    """
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    secure_dir(p.parent)
+    p.write_text(content, encoding="utf-8", newline="\n")
+    secure_file(p, mode)
