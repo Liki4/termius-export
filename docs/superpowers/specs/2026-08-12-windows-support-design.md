@@ -63,12 +63,29 @@ Three conclusions:
   Electron app. It is unrelated to Termius's field-level secretbox encryption. Recorded here so
   it is not investigated a second time.
 
+## Scope
+
+**Windows only.** Linux (Fedora) is the development platform and is already confirmed working;
+macOS is validated separately and independently of this change.
+
+This gives the change a hard invariant, stated once here and enforced throughout:
+
+> **POSIX behaviour must be unchanged.** Not "probably fine" — unchanged. Every existing code
+> path on Linux and macOS must produce byte-identical output and perform the same syscalls.
+
+The invariant is what makes the narrow scope safe. Linux does not need re-verification because
+nothing about it changes, and macOS's independent validation is not invalidated by this work.
+Concretely: `_from_macos_keychain` is not touched, the existing Linux/macOS not-found message is
+not touched, and `fsperm`'s POSIX branch performs exactly the `chmod` calls `cli.py` performs
+today. New behaviour is reachable only under `sys.platform == "win32"`.
+
 ## Non-goals
 
 - Refactoring `localkey.py` onto the `keyring` package. It would unify three platforms, but it
-  adds a dependency and changes the Linux path that is currently the only verified one.
+  adds a dependency and would rewrite the macOS and Linux paths — violating the invariant above.
 - Backfilling tests for `crypto` / `normalize` / existing writers. Out of scope for this change.
 - Supporting hardware-backed keys (Windows TPM). The private key never leaves the hardware.
+- Any macOS change, including to its not-found message. Validated on a separate track.
 
 ## Design
 
@@ -77,7 +94,7 @@ Three conclusions:
 | File | Change |
 |---|---|
 | `fsperm.py` | **new** — platform-dependent permission hardening, nothing else |
-| `localkey.py` | add `_from_credential_manager`; make the not-found message platform-aware |
+| `localkey.py` | add `_from_credential_manager`; add a Windows branch to the not-found message, leaving the existing POSIX text verbatim |
 | `cli.py` | delegate to `fsperm`; carry a `warnings` list into the summary |
 | `writers/openssh.py` | quote `IdentityFile` when the path contains whitespace |
 | `source.py` | add the Windows path to the `IndexedDbNotFound` message |
@@ -183,19 +200,26 @@ current output byte-identical unless a path genuinely contains a space.
 
 ## Verification
 
-Split honestly by what each side can actually falsify. The development machine has no Termius
-data and no `secret-tool`, so no real-data Linux regression is possible here.
+Split by what each side can actually falsify.
 
-Runnable on Linux (by the developer):
+**POSIX regression** is handled by construction, not by testing: the invariant in *Scope* means
+no Linux or macOS code path changes. The one place this needs active checking is
+`writers/openssh.py`, which is shared code rather than a platform branch — the quoting predicate
+must leave every space-free path untouched. That is directly testable on Linux and is covered
+below.
+
+Runnable on the Linux development machine:
 
 - `ruff check` and module import on all touched files.
 - New `tests/` — the repository's first — covering only platform-independent pure logic:
-  blob encoding disambiguation given synthetic bytes, `icacls` argument construction, the
-  quoting predicate.
+  blob encoding disambiguation given synthetic bytes, `icacls` argument construction, and the
+  quoting predicate including its no-change-without-spaces guarantee.
 - A synthetic `Model` written through `OpenSshWriter`, then read back with a real `ssh -G`
   invocation. This exercises the quoting change end to end, since `ssh` is present locally.
+  Note the development machine has no Termius data and no `secret-tool`, so a real-data export
+  cannot be run here; the synthetic model is what makes the writer path testable regardless.
 
-Only verifiable on Windows (by the user):
+Only verifiable on Windows, by the user:
 
 - Credential Manager read, and which blob encoding was used.
 - `icacls` actually restricting the exported keys.
