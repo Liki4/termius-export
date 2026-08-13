@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, "src")
 
-from termius_export.model import AliasAllocator, slug  # noqa: E402
+from termius_export.model import AliasAllocator, slug
 
 
 class SlugTests(unittest.TestCase):

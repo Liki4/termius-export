@@ -12,7 +12,6 @@ unusable alias. A check that misnames the cause costs almost as much as one that
 """
 
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
