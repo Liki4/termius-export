@@ -95,14 +95,19 @@ The service name is `termius-app` for snap installs and `Termius` on macOS — T
 executable name, which is why looking up "Termius" on a snap install finds nothing. Any keyring
 browser (Seahorse, KWalletManager) can show the entry too.
 
-**A third case, if the export stops with "it does not decrypt this data".** A key was found, but
-the wrong one. Moving between the macOS App Store and DMG builds leaves the old keychain entry
-behind, and the two hold different keys. List what you actually have, then pass the right one in
-with `--local-key-file`:
+**If your machine holds more than one Termius key**, which happens on macOS when the App Store
+and DMG builds have both been installed, the export sorts it out by itself: it tries each entry
+against the data and keeps the one that decrypts. On macOS that can mean one extra keychain
+prompt, since every entry it has to try asks for authorization.
+
+It stops only if *none* of them fit — usually a `--data-dir` from an install whose key is not in
+this keyring. To see what you have, and pass the right one in explicitly:
 
 ```bash
 security dump-keychain | grep -i termius            # macOS
 secret-tool search --all service termius-app        # Linux
+
+python -m termius_export --local-key-file localkey.txt --out out
 ```
 
 On Windows the key lives in Credential Manager under the target `Termius/localKey`. The tool
@@ -173,11 +178,10 @@ Other outputs:
 
 ## Limitations
 
-- Verified on Linux (snap install), on Windows, and on macOS (DMG build). Both the Windows and
-  macOS runs were real 213-host, 22-key profiles: the key read from the platform credential
-  store, the data directory auto-detected, all six formats emitted and self-checked. The macOS
-  **App Store** build has not been exercised — it is sandboxed, so its data lives in an app
-  container; the container is globbed rather than hard-coded, but the path is inferred
+- Verified on Linux (snap install), on Windows, and on macOS — both the DMG and App Store
+  builds, on a machine carrying the two side by side. The Windows and macOS runs were real
+  213-host, 22-key profiles: the key read from the platform credential store, the data
+  directory auto-detected, all six formats emitted and self-checked
 - Whether `ssh` accepts a non-ASCII alias depends on the C library, not on OpenSSH: glibc takes
   one under any locale, macOS refuses one under any UTF-8 locale. Since a generated `sshconfig`
   is meant to be portable, hosts whose name is not ASCII get a **second `Host` pattern** that

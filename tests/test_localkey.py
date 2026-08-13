@@ -6,8 +6,11 @@ base64 of exactly 32 bytes - the same technique that produced the cipher format.
 """
 
 import base64
+import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, "src")
 
@@ -71,6 +74,72 @@ class ImportSafetyTests(unittest.TestCase):
     def test_candidate_services_still_contains_the_measured_windows_service(self):
         # Measured on a real Windows install: target=Termius/localKey
         self.assertIn("Termius", localkey.CANDIDATE_SERVICES)
+
+
+class CandidateSelectionTests(unittest.TestCase):
+    """Which entry wins when a machine holds more than one.
+
+    Not hypothetical: a Mac carrying both the DMG and App Store builds holds `Termius` and
+    `Termius (MAS)` under `account=localKey` with *different* keys. The fixed candidate order
+    cannot be right for both profiles, so the caller supplies a test and the first entry that
+    actually decrypts wins.
+    """
+
+    def _backends(self, keys):
+        return lambda: [("fake keyring", lambda service: keys.get(service))]
+
+    BOTH = {"Termius": "dmg-key", "Termius (MAS)": "mas-key"}
+
+    def test_without_a_validator_the_first_entry_found_wins(self):
+        """Unchanged behaviour, and what the fixed order amounts to on its own: a guess."""
+        with mock.patch.object(localkey, "_available_backends", self._backends(self.BOTH)):
+            value, source = localkey.find_local_key()
+        self.assertEqual(value, "dmg-key")
+        self.assertIn("service=Termius,", source)
+
+    def test_a_readable_key_that_does_not_fit_is_passed_over(self):
+        with mock.patch.object(localkey, "_available_backends", self._backends(self.BOTH)):
+            value, source = localkey.find_local_key(lambda k: k == "mas-key")
+        self.assertEqual(value, "mas-key")
+        self.assertIn("Termius (MAS)", source)
+
+    def test_the_first_working_key_still_wins_when_it_is_also_the_first_found(self):
+        with mock.patch.object(localkey, "_available_backends", self._backends(self.BOTH)):
+            value, _ = localkey.find_local_key(lambda k: True)
+        self.assertEqual(value, "dmg-key")
+
+    def test_entries_that_all_fail_are_reported_apart_from_no_entries_at_all(self):
+        """Three failure modes, three messages. "None of these fit" and "there are none" need
+        completely different fixes."""
+        with (
+            mock.patch.object(localkey, "_available_backends", self._backends(self.BOTH)),
+            self.assertRaises(localkey.LocalKeyNotFound) as caught,
+        ):
+            localkey.find_local_key(lambda k: False)
+        message = str(caught.exception)
+        self.assertIn("none of them decrypt", message)
+        self.assertIn("service=Termius,", message)
+        self.assertIn("Termius (MAS)", message)
+        self.assertIn("--local-key-file", message)
+
+    def test_no_entries_at_all_keeps_the_original_message(self):
+        with (
+            mock.patch.object(localkey, "_available_backends", self._backends({})),
+            self.assertRaises(localkey.LocalKeyNotFound) as caught,
+        ):
+            localkey.find_local_key(lambda k: True)
+        self.assertIn("holds no Termius localKey", str(caught.exception))
+
+    def test_an_explicit_file_is_not_validated_away(self):
+        """The user named it. Silently moving on to a keyring entry would be the wrong kind of
+        helpful; a bad explicit key is reported by the decryption failure instead."""
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+            fh.write("explicit-key\n")
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        value, source = localkey.load_local_key(path, lambda k: False)
+        self.assertEqual(value, "explicit-key")
+        self.assertIn("file (", source)
 
 
 def _has_live_credential() -> bool:
