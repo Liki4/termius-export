@@ -70,7 +70,7 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
     # Only reachable with a profile whose alphabetically first alias is one ssh rejects.
     probe = "termius-export-probe.invalid"
     try:
-        _run(["ssh", "-G", "-F", str(path), probe], check=True)
+        _run(["ssh", "-G", "-F", str(path), "--", probe], check=True)
     except subprocess.CalledProcessError as exc:
         first = (exc.stderr or "").strip().splitlines()
         return [Check("openssh: ssh -G parse", False, first[0] if first else "ssh rejected the config")]
@@ -80,46 +80,72 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
     mismatches: list[str] = []
     rejected: list[str] = []
     resolved = 0
+    needed_ascii = 0
     for h in model.hosts:
         if not h.address:
             continue
-        result = _run(["ssh", "-G", "-F", str(path), h.alias])
-        if result.returncode != 0:
-            # ssh refused the destination outright, so it resolved nothing and stdout is empty.
-            # Falling through to the value comparison would report this as "<alias>: hostname",
-            # a mismatch that never happened, and send the reader hunting for a wrong address
-            # instead of an unusable alias.
-            #
-            # The case that exposed it: ssh rejects a non-ASCII destination under a UTF-8
-            # locale ("hostname contains invalid characters", exit 255) and does so *before*
-            # reading the config, so no ssh_config content can rescue those hosts. It is
-            # locale-dependent, which is why a C-locale run never sees it.
-            reason = (result.stderr or "").strip().splitlines()
-            rejected.append(f"{h.alias} ({reason[0] if reason else f'exit {result.returncode}'})")
+
+        # Every pattern on the host's `Host` line is tried, not just the first. Checking only
+        # the original would leave the ASCII alias unverified on a libc that accepts the
+        # original - which is precisely the platform where it is not exercised in anger, and so
+        # precisely where it would rot unnoticed. Each pattern ssh accepts must resolve
+        # correctly; at least one must be accepted.
+        accepted_any = False
+        refusal = ""
+        for alias in h.aliases:
+            # "--" so an alias can never be read as an option. slug() permits a leading "-",
+            # and without the separator "ssh -G -F cfg -orig" parses as "-o rig" and fails with
+            # `no argument after keyword "rig"` - an error about the config file, for a problem
+            # that is entirely in the alias.
+            result = _run(["ssh", "-G", "-F", str(path), "--", alias])
+            if result.returncode != 0:
+                # ssh refused the destination outright, so it resolved nothing and stdout is
+                # empty. Falling through to the value comparison would report this as
+                # "<alias>: hostname", a mismatch that never happened, and send the reader
+                # hunting for a wrong address instead of an unusable alias.
+                #
+                # The case that exposed it: ssh rejects a non-ASCII destination under a UTF-8
+                # locale ("hostname contains invalid characters", exit 255) and does so
+                # *before* reading the config, so no ssh_config content can rescue it. Whether
+                # it happens at all depends on the C library, not on OpenSSH.
+                stderr_lines = (result.stderr or "").strip().splitlines()
+                refusal = refusal or (stderr_lines[0] if stderr_lines else f"exit {result.returncode}")
+                continue
+
+            accepted_any = True
+            out = result.stdout
+            # ssh canonicalises the hostname to lower case, so "EXAMPLE-Web-Host4" comes back
+            # as "example-web-host4". DNS is case-insensitive; comparing case-sensitively here
+            # reported every host with an uppercase address as a mismatch.
+            if _ssh_config_value(out, "hostname").lower() != h.address.lower():
+                mismatches.append(f"{alias}: hostname")
+            elif _ssh_config_value(out, "port") != str(h.port):
+                mismatches.append(f"{alias}: port")
+            elif h.username and _ssh_config_value(out, "user") != h.username:
+                mismatches.append(f"{alias}: user")
+
+        if not accepted_any:
+            rejected.append(f"{h.alias} ({refusal})")
             continue
 
         resolved += 1
-        out = result.stdout
-        # ssh canonicalises the hostname to lower case, so "EXAMPLE-Web-Host4" comes back as
-        # "example-web-host4". DNS is case-insensitive; comparing case-sensitively here reported
-        # every host with an uppercase address as a mismatch.
-        if _ssh_config_value(out, "hostname").lower() != h.address.lower():
-            mismatches.append(f"{h.alias}: hostname")
-        elif _ssh_config_value(out, "port") != str(h.port):
-            mismatches.append(f"{h.alias}: port")
-        elif h.username and _ssh_config_value(out, "user") != h.username:
-            mismatches.append(f"{h.alias}: user")
+        if refusal:
+            needed_ascii += 1
 
-    checks.append(
-        Check("openssh: alias accepted by ssh", True, f"all {resolved} aliases accepted")
-        if not rejected
-        else Check(
-            "openssh: alias accepted by ssh",
-            False,
-            f"{len(rejected)} of {resolved + len(rejected)} rejected by ssh itself, so those "
-            f"hosts cannot be reached by alias: " + "; ".join(rejected[:3]),
+    if rejected:
+        checks.append(
+            Check(
+                "openssh: alias accepted by ssh",
+                False,
+                f"{len(rejected)} of {resolved + len(rejected)} host(s) have no alias this ssh "
+                "accepts: " + "; ".join(rejected[:3]),
+            )
         )
-    )
+    else:
+        detail = f"all {resolved} hosts reachable"
+        if needed_ascii:
+            detail += f"; {needed_ascii} only via their ASCII alias, which this ssh refused the original for"
+        checks.append(Check("openssh: alias accepted by ssh", True, detail))
     checks.append(
         Check("openssh: per-host readback", True, f"all {resolved} hosts match")
         if not mismatches
@@ -187,9 +213,7 @@ def verify_tabby(path: pathlib.Path, model: Model) -> list[Check]:
         except ValueError:
             malformed.append(line.strip()[:60])
     if malformed:
-        return [
-            Check("tabby: quoted scalars", False, f"{len(malformed)} malformed: {'; '.join(malformed[:3])}")
-        ]
+        return [Check("tabby: quoted scalars", False, f"{len(malformed)} malformed: {'; '.join(malformed[:3])}")]
 
     return [
         Check("tabby: structural check", True, f"{entries} profiles, all quoted scalars parse"),

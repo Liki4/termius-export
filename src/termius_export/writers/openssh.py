@@ -1,7 +1,13 @@
 """OpenSSH client configuration.
 
 verified = roundtrip: the output is parsed by ``ssh -G`` itself, and the hostname / port / user
-it resolves are compared against the model for every host. See verify.py.
+it resolves are compared against the model for every host — for **every** ``Host`` pattern the
+local ssh accepts, not just the first. See verify.py.
+
+One caveat the label cannot carry on its own: which aliases ssh accepts depends on the C
+library, not on OpenSSH. glibc takes a CJK destination under every locale; macOS refuses one
+under any UTF-8 locale. That is why hosts whose alias is not ASCII get a second, ASCII-only
+pattern rather than being validated only where they happen to work. See trap 5 in CLAUDE.md.
 """
 
 from __future__ import annotations
@@ -48,11 +54,24 @@ class OpenSshWriter:
             "#",
             "# IdentityFile paths point into this export's keys/ directory. If you move the",
             "# keys into ~/.ssh/, update these paths to match.",
-            "",
         ]
 
+        # Only explained when it actually happened, so an ASCII-only export stays as it was.
+        if any(h.ascii_alias for h in model.hosts):
+            lines += [
+                "#",
+                "# Some hosts carry a second, ASCII-only name. Whether ssh accepts a non-ASCII",
+                "# destination depends on the C library: glibc takes one under any locale, macOS",
+                "# refuses one under any UTF-8 locale. Both names work wherever the first does.",
+            ]
+
+        lines.append("")
+
         for h in model.hosts:
-            lines.append(f"Host {h.alias}")
+            # `Host` takes several patterns, so the original alias is never given up. The ASCII
+            # one comes second on purpose: if the original ever becomes valid everywhere, the
+            # file should not have quietly trained people onto the derived name.
+            lines.append(f"Host {' '.join(h.aliases)}")
             if h.address:
                 lines.append(f"    HostName {h.address}")
             if h.username:
