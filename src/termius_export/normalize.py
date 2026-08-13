@@ -23,8 +23,8 @@ from .model import (
     Model,
     Proxy,
     expand_packed_ipv4,
+    file_slug,
     is_ssh_safe,
-    slug,
 )
 
 if TYPE_CHECKING:
@@ -122,7 +122,9 @@ def build_model(tables: RawTables, dec: Decryptor, *, source_info: dict | None =
         key = Key(
             id=entity,
             label=label,
-            file_base=slug(label, f"key_{row.get('local_id') or row.get('id')}"),
+            # file_slug, not slug: this becomes a path component, and slug answers the ssh
+            # question rather than the filename one. See model.file_slug.
+            file_base=file_slug(label, f"key_{row.get('local_id') or row.get('id')}"),
             private_key=private if private.endswith("\n") else private + "\n",
             public_key=(_text(row.get("public_key")) + "\n") if row.get("public_key") else "",
             passphrase=_text(row.get("passphrase")),

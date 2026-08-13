@@ -47,6 +47,7 @@ verify.py     read outputs back, compare against the model
 | `fsperm.py` | Platform-dependent filesystem writes and permission hardening |
 | `normalize.py` | Resolve Termius entity references, produce a `Model` |
 | `model.py` | Dataclasses for the intermediate model |
+| `keyfiles.py` | Name and place the exported private keys on disk |
 | `writers/` | One writer per target client |
 | `verify.py` | Self-verification of generated output |
 
@@ -81,10 +82,10 @@ Two rules enforced in `crypto.py`:
 
 ---
 
-## Five traps
+## Six traps
 
-All five were hit during development, the last one only once a Mac was involved. Don't
-rediscover them.
+All six were hit during development — the fifth only once a Mac was involved, the sixth only
+once `_dump_keys` was moved somewhere a test could reach it. Don't rediscover them.
 
 ### 1. LevelDB holds multiple generations of the same record
 
@@ -274,6 +275,50 @@ ssh reads `@` in a destination as the user separator. `Host root@gateway` plus `
 root@gateway` resolves to user `root` on a host named `gateway` — a different machine, no
 error. `@` is now replaced like any other unsafe character.
 
+### 6. A `slug` is a destination, not a filename, and `file_base` is a filename
+
+`slug()` answers "what may appear in something someone types at `ssh`". `Key.file_base` used
+its answer as **one path component** under `keys/`, which is a different question. Three shapes
+`slug` happily produces are not names at that position, and all three fail without an error:
+
+| `file_base` | What actually happened |
+|---|---|
+| `.` | `keys/.` *is* `keys/` — the key directory was replaced by a file holding a private key |
+| `..` | `keys/..` is the output root — `IsADirectoryError`, mid-export, after files were written |
+| `NUL`, `nul.pem` | On Windows the OS opens the null device rather than creating a file: the write succeeds and the key is discarded. Reserved **by stem**, so an extension does not help |
+
+`model.file_slug` is the filename-safe form and `normalize` builds `file_base` with it. It also
+drops a trailing dot, which Windows strips silently — `backup.` and `backup` are one file there,
+so leaving it would let the filesystem merge two keys behind the allocator's back.
+
+**The worse half was collision handling.** `_dump_keys` registered only the private-key path;
+the `.pub` path was derived and never reserved. Dots survive `slug`, so a key labelled
+`id_rsa.pub` is an ordinary key — and next to one labelled `id_rsa` the two fought over one
+filename:
+
+```
+keys/id_rsa       PRIVATE-A          # written for "id_rsa"
+keys/id_rsa.pub   PUBLIC-A           # ...on top of "id_rsa.pub"'s private key
+```
+
+Either ordering loses a file. The costly one destroys a private key outright and leaves
+`IdentityFile` pointing at a public key.
+
+**And the self-check could not see it.** `verify_key_files` decides what to fingerprint by
+suffix, skipping `*.pub` and `*.txt` — so the one file the collision corrupts is the one it
+never looks at, and a key merely *named* `notes.txt` was never checked either. The export was
+wrong, a private key was gone, and every check reported green. That is precisely the
+"quietly wrong" outcome this project rates as worse than no output at all.
+
+`keyfiles._allocate` now reserves the private path and its `.pub` sibling **as a pair**, and
+treats a name ending in a verifier-reserved suffix as taken, so the counter moves it aside
+(`id_rsa.pub` → `id_rsa.pub_2`). That also removes a third latent case: an orphan key labelled
+`README.txt` used to be overwritten by the `keys-unlinked/README.txt` written after it.
+
+The general lesson is the one the tests section already makes: this lived in `cli.py`, so
+**nothing could test it**. Moving it to `keyfiles.py` is what surfaced all of it. When a
+function cannot be reached from a test, that is a fact about the design, not about the test.
+
 ---
 
 **`Local State`'s `os_crypt.encrypted_key` is not the localKey.** It base64-decodes to a
@@ -303,6 +348,11 @@ Tests requiring a real Windows API call are guarded with
 `write_private` lives in `fsperm` rather than `cli`, why data-directory resolution lives in
 `datadir`, and why the "wrong key" message lives in `localkey`. When something in `cli` needs
 a test, move it out rather than importing `cli`.
+
+`keyfiles` is the case that proves the rule was worth enforcing rather than merely stated.
+`_dump_keys` sat in `cli` and was therefore untested, and it was silently destroying private
+keys — see trap 6. The move came first and the defects fell out of the first tests written
+against it. Anything still in `cli` should be read as untested, because it is.
 
 `envelope` was split out of `crypto` for the same reason, and it is the sharper case: the
 function that picks which field a candidate key is tested against has a silent failure mode.

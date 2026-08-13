@@ -11,8 +11,8 @@ from . import writers as writers_mod
 from .crypto import DecryptionFailed, Decryptor, UnknownCipherVersion, first_ciphertext
 from .datadir import candidates as data_dir_candidates
 from .datadir import default_data_dir
+from .keyfiles import dump_keys
 from .localkey import LocalKeyNotFound, load_local_key, wrong_key_message
-from .model import Model
 from .normalize import build_model
 from .source import IndexedDbNotFound, locate_leveldb, read_tables
 from .verify import verify_outputs
@@ -66,40 +66,6 @@ def _add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
 #: exist on Windows and write_text translates newlines there. Aliased rather than renamed at
 #: each call site to keep this change small.
 _write_private = fsperm.write_private
-
-
-def _dump_keys(model: Model, out_dir: pathlib.Path) -> dict[str, str]:
-    """Write private keys to disk. Keys no host references are still written, never dropped."""
-    paths: dict[str, str] = {}
-    used: set[pathlib.Path] = set()
-    for key in model.keys:
-        target_dir = out_dir / ("keys" if key.linked else "keys-unlinked")
-        candidate = target_dir / key.file_base
-        n = 2
-        while candidate in used:
-            candidate = target_dir / f"{key.file_base}_{n}"
-            n += 1
-        used.add(candidate)
-        _write_private(candidate, key.private_key, 0o600)
-        if key.public_key:
-            _write_private(candidate.with_suffix(candidate.suffix + ".pub"), key.public_key, 0o644)
-        paths[key.id] = str(candidate.resolve())
-
-    orphans = model.orphan_keys
-    if orphans:
-        _write_private(
-            out_dir / "keys-unlinked" / "README.txt",
-            "These private keys are not referenced by any host in the source data.\n"
-            'Note: "not referenced" does NOT mean "not in use" - a key may well be used\n'
-            "outside Termius. This tool never deletes anything; verify before you do.\n\n"
-            + "\n".join(
-                f"{k.label or '(no label)'}\t{k.file_base}\tpassphrase={'yes' if k.has_passphrase else 'no'}"
-                for k in orphans
-            )
-            + "\n",
-            0o600,
-        )
-    return paths
 
 
 def _key_validator(tables):
@@ -174,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     fsperm.secure_dir(out_dir)
 
-    key_paths = {} if args.no_keys else _dump_keys(model, out_dir)
+    key_paths = {} if args.no_keys else dump_keys(model, out_dir)
     ctx = WriteContext(
         include_secrets=not args.no_secrets,
         key_paths=key_paths,

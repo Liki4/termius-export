@@ -14,7 +14,12 @@ keywords = ["termius", "ssh", "migration", "indexeddb", "export"]
 dependencies = [
   "PyNaCl>=1.5",
   # Chromium IndexedDB / V8 structured-clone parsing. GitHub-only, not on PyPI.
-  "ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader",
+  #
+  # Pinned to the same revision as flake.nix. Unpinned, `pip install -e .` and `nix develop`
+  # resolve to different code the moment upstream commits, and CI's entry-point job installs
+  # whatever HEAD happens to be. This is the one dependency the project calls not reasonably
+  # reimplementable, so it is the last one that should float. Bump both files together.
+  "ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader@ef840de30221c4d65bc96d2f4d9057e9ef2f526d",
 ]
 
 [project.scripts]

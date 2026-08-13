@@ -332,6 +332,11 @@ def verify_key_files(out_dir: pathlib.Path, model: Model) -> list[Check]:
     if not shutil.which("ssh-keygen"):
         return [Check("keys: ssh-keygen parse", None, "ssh-keygen not available, skipped")]
 
+    # The suffix filter skips the .pub siblings and the orphan README, which is only sound
+    # because keyfiles._allocate guarantees no private key is ever written to a path ending in
+    # one - a key labelled "id_rsa.pub" is an ordinary label, since dots survive slug(). Before
+    # that guarantee such a key was silently excluded from this check while still being
+    # exported, which is the failure this file exists to prevent. See keyfiles._NOT_A_PRIVATE_KEY.
     files = [
         p
         for p in out_dir.rglob("*")

@@ -162,6 +162,9 @@ Other outputs:
 - `hosts.csv` — import into Termius or another manager
 - `tabby-profiles.yaml` — merge into the `profiles` list in `~/.config/tabby/config.yaml`
 - `termix-hosts.json` — import from the Termix Hosts panel
+- `export.json` — the normalized model, for scripting against. Every host carries an
+  `ascii_alias`, empty unless its `alias` is one some `ssh` refuses; the key is always present
+  so the schema does not vary per host. Prefer it when you need a name that works everywhere
 - `keys-unlinked/` — private keys no host referenced; read its `README.txt` before deleting any
 
 ## Security
@@ -185,7 +188,9 @@ Other outputs:
 - Whether `ssh` accepts a non-ASCII alias depends on the C library, not on OpenSSH: glibc takes
   one under any locale, macOS refuses one under any UTF-8 locale. Since a generated `sshconfig`
   is meant to be portable, hosts whose name is not ASCII get a **second `Host` pattern** that
-  works everywhere — `Host 生产服务器 host-1`. The original is kept and listed first, so nothing
+  works everywhere — `Host 生产服务器 192.0.2.30`. The ASCII name comes from the label where
+  something survives stripping and from the address where nothing does, which is what Termius
+  itself displays for a host you never named. The original is kept and listed first, so nothing
   changes for anyone whose names were already ASCII
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
