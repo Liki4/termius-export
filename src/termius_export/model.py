@@ -141,7 +141,12 @@ def expand_packed_ipv4(value: str) -> str:
     return str(ipaddress.IPv4Address(packed))
 
 
-_SLUG_STRIP = re.compile(r"[^\w.@-]+")
+#: ``@`` is deliberately **not** in the permitted set, even though it is a legal filename
+#: character and reads naturally in a label like ``root@gateway``. ssh parses ``@`` in a
+#: destination as the user separator, so ``ssh root@gateway`` against a ``Host root@gateway``
+#: block resolves to user ``root`` on a host literally named ``gateway`` — a different machine,
+#: silently, with no error. Replacing it with ``_`` costs nothing and removes the trap.
+_SLUG_STRIP = re.compile(r"[^\w.-]+")
 
 
 def slug(value: str, fallback: str) -> str:

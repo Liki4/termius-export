@@ -224,6 +224,38 @@ def _not_found_message(backend_names: list[str], platform: str | None = None) ->
     )
 
 
+def wrong_key_message(key_source: str) -> str:
+    """The "a key was found but it does not decrypt" message.
+
+    Distinct from the two "no key" messages above, and it needs to be: the fix is to pick a
+    *different* entry, not to install a client or unlock anything.
+
+    This is not hypothetical. Termius leaves the old keychain entry behind when a machine moves
+    between the App Store and DMG builds, and the two hold **different** keys — measured on a
+    real Mac carrying both ``Termius`` and ``Termius (MAS)``. ``CANDIDATE_SERVICES`` tries
+    ``Termius`` first, which is right for a DMG install and wrong for the mirror case.
+    """
+    return (
+        f"A localKey was found ({key_source}) but it does not decrypt this data.\n"
+        "\n"
+        "The MAC check failed, so the key is wrong rather than the data being corrupt. No\n"
+        "output from this run should be trusted.\n"
+        "\n"
+        "Most likely causes:\n"
+        "  - the keyring holds more than one Termius entry and the first match was not the\n"
+        "    live one. Switching between the App Store and DMG builds leaves the old entry\n"
+        f"    behind, and the two hold different keys (tried, in order: {', '.join(CANDIDATE_SERVICES)})\n"
+        "  - --data-dir points at a profile belonging to a different install than the key\n"
+        "\n"
+        "List every Termius entry you have:\n"
+        "  secret-tool search --all service termius-app       # Linux\n"
+        "  security dump-keychain | grep -i termius           # macOS\n"
+        "  cmdkey /list | Select-String termius               # Windows (PowerShell)\n"
+        "\n"
+        "Then read the right one out and pass it in via --local-key-file."
+    )
+
+
 def find_local_key() -> tuple[str, str]:
     """Return ``(key_base64, source_description)``; raise LocalKeyNotFound if unavailable.
 

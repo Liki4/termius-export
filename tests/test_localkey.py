@@ -111,5 +111,33 @@ class NotFoundMessageTests(unittest.TestCase):
         self.assertIn("--local-key-file", message)
 
 
+class WrongKeyMessageTests(unittest.TestCase):
+    """A key that is found but does not decrypt is a third failure mode, not a variant.
+
+    It needs its own message because the fix is different: pick another keyring entry, rather
+    than install a client or unlock anything. It is also not hypothetical - a real Mac was
+    found holding both ``Termius`` and ``Termius (MAS)`` under account ``localKey``, with
+    **different** keys, because switching between the DMG and App Store builds leaves the old
+    entry behind.
+    """
+
+    def test_names_the_key_source_that_failed(self):
+        message = localkey.wrong_key_message("macOS keychain (service=Termius, account=localKey)")
+        self.assertIn("service=Termius", message)
+
+    def test_says_the_key_is_wrong_rather_than_the_data_corrupt(self):
+        message = localkey.wrong_key_message("file (localkey.txt)")
+        self.assertIn("MAC", message)
+        self.assertIn("should be trusted", message)
+
+    def test_lists_the_services_that_were_tried_in_order(self):
+        message = localkey.wrong_key_message("x")
+        for service in localkey.CANDIDATE_SERVICES:
+            self.assertIn(service, message)
+
+    def test_offers_the_manual_escape_hatch(self):
+        self.assertIn("--local-key-file", localkey.wrong_key_message("x"))
+
+
 if __name__ == "__main__":
     unittest.main()
