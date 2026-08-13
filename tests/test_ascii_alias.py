@@ -11,13 +11,16 @@ have quietly trained people onto the derived name.
 """
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, "src")
 
+from termius_export import verify as verify_module
 from termius_export.model import AliasAllocator, Host, Model, ascii_slug, is_ssh_safe
 from termius_export.normalize import build_model
 from termius_export.verify import verify_openssh
@@ -166,48 +169,98 @@ class NormalizeAllocationOrderTests(unittest.TestCase):
         self.assertEqual(model.hosts[0].aliases, ["web-01"])
 
 
+def _refusing_run(destinations):
+    """Wrap ``verify._run`` so the named destinations come back refused.
+
+    Which destinations a given ssh refuses is a property of the platform — Win32 OpenSSH
+    accepts both a space and a leading dash where macOS refuses both — so a test that needs a
+    refusal cannot obtain one portably. Only the refusal is simulated: the config is still
+    parsed by the real ssh, and accepted aliases are still resolved by it. The same helper and
+    the same reasoning appear in test_verify_checks.
+    """
+    real = verify_module._run
+
+    def run(args, **kwargs):
+        if args[-1] in destinations:
+            return subprocess.CompletedProcess(
+                args, returncode=255, stdout="", stderr="hostname contains invalid characters\n"
+            )
+        return real(args, **kwargs)
+
+    return mock.patch.object(verify_module, "_run", run)
+
+
+def _ssh_refuses(destination):
+    """Whether the ssh on this machine refuses ``destination`` outright."""
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = Path(tmp) / "empty"
+        empty.write_text("", encoding="utf-8")
+        return verify_module._run(["ssh", "-G", "-F", str(empty), "--", destination]).returncode != 0
+
+
 @unittest.skipUnless(shutil.which("ssh"), "ssh not installed")
 class DualPatternVerificationTests(unittest.TestCase):
     """A host is reachable if *any* of its patterns works, and every pattern ssh accepts must
     still resolve to the right values.
-
-    A leading dash stands in for the real-world case here: ssh refuses it in every locale and on
-    every libc, whereas CJK depends on both, so pinning the test to CJK would make it pass or
-    fail depending on where it runs.
     """
 
-    def _by_name(self, config, model):
+    def _by_name(self, config, model, refuse=()):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sshconfig"
             path.write_text(config, encoding="utf-8", newline="\n")
-            return {c.name: c for c in verify_openssh(path, model)}
+            with _refusing_run(set(refuse)):
+                return {c.name: c for c in verify_openssh(path, model)}
 
     def test_an_ascii_fallback_makes_a_refused_host_reachable(self):
-        model = Model(hosts=[Host(id="1", alias="-orig", label="x", address="10.0.0.1", ascii_alias="orig")])
-        checks = self._by_name("Host -orig orig\n    HostName 10.0.0.1\n", model)
+        model = Model(hosts=[Host(id="1", alias="orig", label="x", address="10.0.0.1", ascii_alias="orig-ascii")])
+        checks = self._by_name("Host orig orig-ascii\n    HostName 10.0.0.1\n", model, refuse=["orig"])
         self.assertIs(checks["openssh: alias accepted by ssh"].passed, True)
         self.assertIn("1 only via their ASCII alias", checks["openssh: alias accepted by ssh"].detail)
         self.assertIs(checks["openssh: per-host readback"].passed, True)
 
     def test_a_wrong_value_on_the_fallback_pattern_is_still_caught(self):
         """The fallback must not become an unchecked back door."""
-        model = Model(hosts=[Host(id="1", alias="-orig", label="x", address="10.0.0.1", ascii_alias="orig")])
-        checks = self._by_name("Host -orig orig\n    HostName 10.9.9.9\n", model)
+        model = Model(hosts=[Host(id="1", alias="orig", label="x", address="10.0.0.1", ascii_alias="orig-ascii")])
+        checks = self._by_name("Host orig orig-ascii\n    HostName 10.9.9.9\n", model, refuse=["orig"])
         self.assertIs(checks["openssh: per-host readback"].passed, False)
-        self.assertIn("orig: hostname", checks["openssh: per-host readback"].detail)
+        self.assertIn("orig-ascii: hostname", checks["openssh: per-host readback"].detail)
 
     def test_a_host_with_no_usable_pattern_still_fails(self):
-        model = Model(hosts=[Host(id="1", alias="-orig", label="x", address="10.0.0.1")])
-        checks = self._by_name("Host -orig\n    HostName 10.0.0.1\n", model)
+        model = Model(hosts=[Host(id="1", alias="orig", label="x", address="10.0.0.1")])
+        checks = self._by_name("Host orig\n    HostName 10.0.0.1\n", model, refuse=["orig"])
         self.assertIs(checks["openssh: alias accepted by ssh"].passed, False)
 
-    def test_a_leading_dash_alias_is_not_parsed_as_an_option(self):
-        """Without "--", ssh reads "-orig" as "-o rig" and blames the config file instead."""
+
+@unittest.skipUnless(shutil.which("ssh"), "ssh not installed")
+class RealSshDestinationRulesTests(unittest.TestCase):
+    """What the ssh on *this* machine actually does with the edges `is_ssh_safe` guards.
+
+    These cannot assert on every platform — Win32 OpenSSH validates nothing here — so they skip
+    rather than pretend. Where ssh does validate, they are a drift detector: `is_ssh_safe` must
+    never call something safe that the local ssh then refuses.
+    """
+
+    def test_a_leading_dash_is_not_parsed_as_an_option(self):
+        """The bug this guards is in argv handling, so only a real ssh can show it.
+
+        Without ``--``, ssh reads ``-orig`` as ``-o rig`` and fails with `no argument after
+        keyword "rig"` — an error about the config file, for a problem entirely in the alias.
+        """
+        if not _ssh_refuses("-orig"):
+            self.skipTest("this ssh accepts a leading-dash destination, so there is nothing to misattribute")
         model = Model(hosts=[Host(id="1", alias="-orig", label="x", address="10.0.0.1")])
-        checks = self._by_name("Host -orig\n    HostName 10.0.0.1\n", model)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sshconfig"
+            path.write_text("Host -orig\n    HostName 10.0.0.1\n", encoding="utf-8", newline="\n")
+            checks = {c.name: c for c in verify_openssh(path, model)}
         detail = checks["openssh: alias accepted by ssh"].detail
-        self.assertNotIn("no argument after keyword", detail)
+        self.assertNotIn("no argument after keyword", detail, "the alias was parsed as an option")
         self.assertIn("invalid characters", detail)
+
+    def test_is_ssh_safe_does_not_bless_anything_this_ssh_refuses(self):
+        for alias in ("web-01.prod_a", "1abc", "_abc", ".abc", "a..b", "____", "abc-"):
+            self.assertTrue(is_ssh_safe(alias), alias)
+            self.assertFalse(_ssh_refuses(alias), f"is_ssh_safe says {alias!r} is fine but ssh refused it")
 
 
 if __name__ == "__main__":

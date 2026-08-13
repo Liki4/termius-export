@@ -73,7 +73,21 @@ class ImportSafetyTests(unittest.TestCase):
         self.assertIn("Termius", localkey.CANDIDATE_SERVICES)
 
 
-@unittest.skipUnless(sys.platform == "win32", "requires Windows Credential Manager")
+def _has_live_credential() -> bool:
+    """Whether this machine actually holds the credential the live tests below read.
+
+    They were guarded on `sys.platform == "win32"` alone, which quietly assumes every Windows
+    machine running the suite has Termius installed and launched. CI does not, so they failed
+    on the very first automated run -- a false failure, which CLAUDE.md rates as worse than no
+    check at all, because it teaches people to ignore the whole pass.
+
+    Off Windows `_from_credential_manager` returns None immediately, so this costs nothing
+    there.
+    """
+    return sys.platform == "win32" and localkey._from_credential_manager("Termius") is not None
+
+
+@unittest.skipUnless(_has_live_credential(), "requires a Windows machine with Termius installed")
 class LiveCredentialManagerTests(unittest.TestCase):
     def test_reads_the_termius_local_key(self):
         value = localkey._from_credential_manager("Termius")

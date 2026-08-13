@@ -12,13 +12,16 @@ unusable alias. A check that misnames the cause costs almost as much as one that
 """
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, "src")
 
+from termius_export import verify as verify_module
 from termius_export.model import Host, Model
 from termius_export.verify import verify_openssh, verify_tabby
 from termius_export.writers import WriteContext
@@ -30,6 +33,31 @@ def _write(tmp, name, content):
     p = Path(tmp) / name
     p.write_text(content, encoding="utf-8", newline="\n")
     return p
+
+
+def refusing_run(destinations):
+    """Wrap ``verify._run`` so that the named destinations come back refused.
+
+    **There is no destination every ssh refuses.** The first attempt at these tests used a
+    space, on the reasoning that no ctype table anywhere calls it alphanumeric — and CI showed
+    Win32 OpenSSH accepting both a space and a leading dash where macOS refuses both. Which
+    inputs get refused is a property of the platform, not something a test can pin down.
+
+    So only the refusal itself is simulated. Everything else still goes to the real ssh: the
+    config is parsed by ssh, and accepted aliases are resolved by ssh. What is under test here
+    is how ``verify_openssh`` *reports* a refusal, which is our code and should not vary by
+    platform.
+    """
+    real = verify_module._run
+
+    def run(args, **kwargs):
+        if args[-1] in destinations:
+            return subprocess.CompletedProcess(
+                args, returncode=255, stdout="", stderr="hostname contains invalid characters\n"
+            )
+        return real(args, **kwargs)
+
+    return mock.patch.object(verify_module, "_run", run)
 
 
 @unittest.skipUnless(shutil.which("ssh"), "ssh not installed")
@@ -63,23 +91,25 @@ class OpenSshReadbackTests(unittest.TestCase):
 class OpenSshAliasRejectionTests(unittest.TestCase):
     """An alias ssh refuses is a different defect from a value ssh disagrees with.
 
-    A space is refused by ssh's destination validation in every locale, so it is used here as a
-    stable stand-in for the case that actually occurs in the wild: a non-ASCII alias, which ssh
-    rejects only where the locale's single-byte ctype table says so. Pinning the test to the
-    non-ASCII case would make it pass or fail depending on LC_ALL.
+    Only the refusal is simulated, via ``refusing_run``; the config is still parsed by a real
+    ssh and accepted aliases are still resolved by it. See that helper for why no real input
+    works here: which destinations ssh refuses varies by platform, so a test that needs one
+    cannot get it portably.
     """
 
-    def _by_name(self, config, model):
+    def _by_name(self, config, model, refuse=()):
         with tempfile.TemporaryDirectory() as tmp:
-            return {c.name: c for c in verify_openssh(_write(tmp, "sshconfig", config), model)}
+            path = _write(tmp, "sshconfig", config)
+            with refusing_run(set(refuse)):
+                return {c.name: c for c in verify_openssh(path, model)}
 
     def test_a_rejected_alias_is_not_reported_as_a_hostname_mismatch(self):
-        model = Model(hosts=[Host(id="h1", alias="has space", label="x", address="10.0.0.1")])
-        checks = self._by_name("Host has space\n    HostName 10.0.0.1\n", model)
+        model = Model(hosts=[Host(id="h1", alias="demo", label="x", address="10.0.0.1")])
+        checks = self._by_name("Host demo\n    HostName 10.0.0.1\n", model, refuse=["demo"])
 
         alias_check = checks["openssh: alias accepted by ssh"]
         self.assertIs(alias_check.passed, False)
-        self.assertIn("has space", alias_check.detail)
+        self.assertIn("demo", alias_check.detail)
         # ssh's own reason is carried through, in parentheses after the alias.
         self.assertIn("(", alias_check.detail)
 
@@ -94,12 +124,12 @@ class OpenSshAliasRejectionTests(unittest.TestCase):
     def test_a_rejected_alias_does_not_mask_a_real_mismatch(self):
         model = Model(
             hosts=[
-                Host(id="h1", alias="has space", label="x", address="10.0.0.1"),
+                Host(id="h1", alias="refused", label="x", address="10.0.0.1"),
                 Host(id="h2", alias="demo", label="demo", address="10.0.0.2"),
             ]
         )
-        config = "Host has space\n    HostName 10.0.0.1\n\nHost demo\n    HostName 10.9.9.9\n"
-        checks = self._by_name(config, model)
+        config = "Host refused\n    HostName 10.0.0.1\n\nHost demo\n    HostName 10.9.9.9\n"
+        checks = self._by_name(config, model, refuse=["refused"])
         self.assertIs(checks["openssh: alias accepted by ssh"].passed, False)
         self.assertIs(checks["openssh: per-host readback"].passed, False)
         self.assertIn("demo: hostname", checks["openssh: per-host readback"].detail)
@@ -111,8 +141,8 @@ class OpenSshAliasRejectionTests(unittest.TestCase):
         rejected one first. Probing with it reported a perfectly good config as "ssh rejected
         the config" and suppressed every check after it.
         """
-        model = Model(hosts=[Host(id="h1", alias="has space", label="x", address="10.0.0.1")])
-        checks = self._by_name("Host has space\n    HostName 10.0.0.1\n", model)
+        model = Model(hosts=[Host(id="h1", alias="refused", label="x", address="10.0.0.1")])
+        checks = self._by_name("Host refused\n    HostName 10.0.0.1\n", model, refuse=["refused"])
         self.assertIs(checks["openssh: ssh -G parse"].passed, True)
         self.assertIn("openssh: per-host readback", checks, "later checks must still run")
 
