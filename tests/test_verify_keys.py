@@ -53,15 +53,19 @@ class IsEncryptedPemTests(unittest.TestCase):
     def test_plain_pem_is_not_flagged(self):
         d = _keys_dir()
         p = d / "plain"
-        p.write_text("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
-                     encoding="utf-8", newline="\n")
+        p.write_text(
+            "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n", encoding="utf-8", newline="\n"
+        )
         self.assertFalse(_is_encrypted_pem(p))
 
     def test_openssh_format_is_not_flagged(self):
         d = _keys_dir()
         p = d / "modern"
-        p.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
-                     encoding="utf-8", newline="\n")
+        p.write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         self.assertFalse(_is_encrypted_pem(p))
 
 
@@ -89,7 +93,9 @@ class VerifyKeyFilesTests(unittest.TestCase):
         target = d / "good"
         subprocess.run(
             ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(target), "-q"],
-            check=True, capture_output=True, timeout=30,
+            check=True,
+            capture_output=True,
+            timeout=30,
         )
         (d / "good.pub").unlink()  # force ssh-keygen to read the private key itself
         checks = verify_key_files(d.parent, _model(1))
@@ -103,7 +109,9 @@ class VerifyKeyFilesTests(unittest.TestCase):
         target = d / "good"
         subprocess.run(
             ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(target), "-q"],
-            check=True, capture_output=True, timeout=30,
+            check=True,
+            capture_output=True,
+            timeout=30,
         )
         (d / "good.pub").unlink()
         checks = verify_key_files(d.parent, _model(3))
