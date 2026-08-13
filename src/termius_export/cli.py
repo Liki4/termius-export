@@ -8,7 +8,7 @@ import sys
 
 from . import fsperm
 from . import writers as writers_mod
-from .crypto import DecryptionFailed, Decryptor, UnknownCipherVersion
+from .crypto import DecryptionFailed, Decryptor, UnknownCipherVersion, first_ciphertext
 from .datadir import candidates as data_dir_candidates
 from .datadir import default_data_dir
 from .localkey import LocalKeyNotFound, load_local_key, wrong_key_message
@@ -102,6 +102,30 @@ def _dump_keys(model: Model, out_dir: pathlib.Path) -> dict[str, str]:
     return paths
 
 
+def _key_validator(tables):
+    """A test for "does this key belong to this data", or None if it cannot be answered.
+
+    Poly1305 gives a decisive answer, so which keyring entry to use is a question that can be
+    tried rather than inferred. See ``localkey.find_local_key`` for why the fixed candidate
+    order is not enough on its own.
+    """
+    sample = first_ciphertext(tables.tables)
+    if sample is None:
+        # Nothing encrypted to test against - an empty or fully plaintext profile. Rejecting
+        # every candidate would be worse than useless, so fall back to first-one-wins: with no
+        # ciphertext there is no wrong key.
+        return None
+
+    def works(candidate: str) -> bool:
+        try:
+            Decryptor.from_base64(candidate).field(sample)
+        except (ValueError, DecryptionFailed, UnknownCipherVersion):
+            return False
+        return True
+
+    return works
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     os.umask(0o077)
@@ -118,13 +142,16 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
+    # Read before choosing a key, not after. read_tables never needed one, and having the data
+    # in hand turns key selection from a guess about install layout into a measurement.
+    tables = read_tables(leveldb, keep_all_versions=args.keep_all_versions)
+
     try:
-        key_b64, key_source = load_local_key(args.local_key_file)
+        key_b64, key_source = load_local_key(args.local_key_file, _key_validator(tables))
     except LocalKeyNotFound as exc:
         print(exc, file=sys.stderr)
         return 2
 
-    tables = read_tables(leveldb, keep_all_versions=args.keep_all_versions)
     dec = Decryptor.from_base64(key_b64)
     try:
         model = build_model(

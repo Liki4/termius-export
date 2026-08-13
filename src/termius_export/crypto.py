@@ -11,6 +11,10 @@ Key design decision: an encrypted field is identified by its **version header**,
 "looks like base64" heuristic. Heuristics fail in both directions — they misclassify ordinary
 base64 payloads as ciphertext, and they treat a successfully decrypted empty string as a
 failure. A header check avoids both.
+
+That header rule, and everything else about the envelope that does not need a key, lives in
+``envelope`` — which imports nothing, so the test suite can reach it. This module owns only
+what PyNaCl is required for.
 """
 
 from __future__ import annotations
@@ -21,14 +25,29 @@ from dataclasses import dataclass, field
 import nacl.exceptions
 import nacl.secret
 
-#: The only version header observed so far. Anything else means Termius changed its scheme,
-#: which must be reported loudly rather than guessed at.
-KNOWN_HEADER = b"\x04\x01"
+from .envelope import (
+    KNOWN_HEADER,
+    MAC_SIZE,
+    MIN_CIPHERTEXT_LEN,
+    NONCE_SIZE,
+    decode_candidate,
+    first_ciphertext,
+    has_known_header,
+    is_envelope,
+    plausible_envelope,
+)
 
-NONCE_SIZE = 24
-MAC_SIZE = 16
-#: Ciphertext length for empty plaintext: 2-byte header + 24-byte nonce + 16-byte MAC.
-MIN_CIPHERTEXT_LEN = len(KNOWN_HEADER) + NONCE_SIZE + MAC_SIZE
+__all__ = [
+    "KNOWN_HEADER",
+    "MAC_SIZE",
+    "MIN_CIPHERTEXT_LEN",
+    "NONCE_SIZE",
+    "DecryptionFailed",
+    "Decryptor",
+    "UnknownCipherVersion",
+    "first_ciphertext",
+    "is_envelope",
+]
 
 
 class UnknownCipherVersion(Exception):
@@ -65,18 +84,13 @@ class Decryptor:
 
     def _envelope(self, value: str) -> bytes | None:
         """Return the decoded envelope bytes, or None if this field is not encrypted."""
-        if len(value) < 24 or len(value) % 4 != 0:
+        raw = decode_candidate(value)
+        if raw is None:
             return None
-        try:
-            raw = base64.b64decode(value, validate=True)
-        except Exception:
-            return None
-        if len(raw) < MIN_CIPHERTEXT_LEN:
-            return None
-        if raw[: len(KNOWN_HEADER)] != KNOWN_HEADER:
+        if not has_known_header(raw):
             # Shaped like an envelope but with an unfamiliar header. In strict mode, fail
             # rather than silently leaving the field undecrypted.
-            if self.strict and _plausible_envelope(raw):
+            if self.strict and plausible_envelope(raw):
                 raise UnknownCipherVersion(raw[: len(KNOWN_HEADER)])
             return None
         return raw
@@ -112,12 +126,3 @@ class Decryptor:
         if isinstance(node, list):
             return [self.walk(v) for v in node]
         return self.field(node)
-
-
-def _plausible_envelope(raw: bytes) -> bool:
-    """Heuristic for whether unknown-header bytes are worth raising about.
-
-    Only lengths in the "overhead + plausible plaintext" range are treated as suspicious, so
-    unrelated base64 blobs are not misreported as an unknown cipher version.
-    """
-    return MIN_CIPHERTEXT_LEN <= len(raw) <= MIN_CIPHERTEXT_LEN + 8192

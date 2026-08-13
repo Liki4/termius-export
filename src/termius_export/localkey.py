@@ -256,12 +256,39 @@ def wrong_key_message(key_source: str) -> str:
     )
 
 
-def find_local_key() -> tuple[str, str]:
+def no_working_key_message(tried: list[str]) -> str:
+    """Every candidate was readable and none of them decrypted the data."""
+    listed = "\n".join(f"  - {t}" for t in tried)
+    return (
+        "Found a Termius localKey, but none of them decrypt this data.\n"
+        "\n"
+        "Tried, in order:\n"
+        f"{listed}\n"
+        "\n"
+        "Each was rejected by Poly1305, so these are real keys for some other profile rather\n"
+        "than corrupt entries. The usual cause is a --data-dir belonging to an install whose\n"
+        "key is not in this keyring at all.\n"
+        "\n"
+        "If you know which entry is right, read it out and pass it in via --local-key-file."
+    )
+
+
+def find_local_key(validate=None) -> tuple[str, str]:
     """Return ``(key_base64, source_description)``; raise LocalKeyNotFound if unavailable.
 
-    The two failure modes are reported separately on purpose. "No keyring client installed"
-    and "the client works but has no such entry" need completely different fixes, and
-    conflating them sends people looking in the wrong place.
+    ``validate`` decides *which* candidate wins. Without it the first entry that exists is
+    used, which is what the fixed ``CANDIDATE_SERVICES`` order amounts to: a guess about how
+    the machine is laid out. With it, the first entry that actually **decrypts** wins.
+
+    That distinction is not academic. A Mac carrying both the DMG and App Store builds holds
+    ``Termius`` and ``Termius (MAS)`` under ``account=localKey`` with *different* keys, and no
+    single order can be right for both profiles — measured, not imagined. Poly1305 answers the
+    question outright, so it is asked rather than guessed.
+
+    The three failure modes are reported separately on purpose. "No keyring client installed",
+    "the client works but has no such entry", and "entries exist but none of them fit this
+    data" need completely different fixes, and conflating them sends people looking in the
+    wrong place.
     """
     backends = _available_backends()
 
@@ -282,22 +309,40 @@ def find_local_key() -> tuple[str, str]:
             f"account={ACCOUNT}. Any keyring browser (Seahorse, KWalletManager) can show it."
         )
 
+    rejected: list[str] = []
     for service in CANDIDATE_SERVICES:
         for backend, fn in backends:
             value = fn(service)
-            if value:
-                detail = f"{backend} (service={service}, account={ACCOUNT}"
-                encoding = _LAST_BLOB_ENCODING.get(service)
-                if encoding:
-                    detail += f", blob encoding={encoding}"
-                return value, detail + ")"
+            if not value:
+                continue
 
+            detail = f"{backend} (service={service}, account={ACCOUNT}"
+            encoding = _LAST_BLOB_ENCODING.get(service)
+            if encoding:
+                detail += f", blob encoding={encoding}"
+            detail += ")"
+
+            if validate is not None and not validate(value):
+                # A real key, just not this profile's. Keep looking; on macOS each further
+                # candidate costs another keychain authorization prompt, which is why the
+                # loop stops at the first that works rather than collecting them all.
+                rejected.append(detail)
+                continue
+            return value, detail
+
+    if rejected:
+        raise LocalKeyNotFound(no_working_key_message(rejected))
     raise LocalKeyNotFound(_not_found_message([name for name, _ in backends]))
 
 
-def load_local_key(path: str | None) -> tuple[str, str]:
-    """Prefer an explicit file, otherwise fall back to the OS keyring."""
+def load_local_key(path: str | None, validate=None) -> tuple[str, str]:
+    """Prefer an explicit file, otherwise fall back to the OS keyring.
+
+    An explicit file is deliberately **not** validated here. The user named it, so silently
+    moving on to a keyring entry would be the wrong kind of helpful; if it does not fit the
+    data, the decryption failure and ``wrong_key_message`` say so plainly.
+    """
     if path:
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip(), f"file ({path})"
-    return find_local_key()
+    return find_local_key(validate)
