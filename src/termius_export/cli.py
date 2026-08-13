@@ -9,27 +9,14 @@ import sys
 from . import fsperm
 from . import writers as writers_mod
 from .crypto import Decryptor, UnknownCipherVersion
+from .datadir import candidates as data_dir_candidates
+from .datadir import default_data_dir
 from .localkey import LocalKeyNotFound, load_local_key
 from .model import Model
 from .normalize import build_model
 from .source import IndexedDbNotFound, locate_leveldb, read_tables
 from .verify import verify_outputs
 from .writers import WriteContext
-
-DEFAULT_DATA_DIRS = [
-    "~/snap/termius-app/current/.config/Termius",
-    "~/.config/Termius",
-    "~/Library/Application Support/Termius",
-    "~/AppData/Roaming/Termius",
-]
-
-
-def _default_data_dir() -> str | None:
-    for candidate in DEFAULT_DATA_DIRS:
-        p = pathlib.Path(candidate).expanduser()
-        if p.is_dir():
-            return str(p)
-    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,10 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     os.umask(0o077)
 
-    data_dir = args.data_dir or _default_data_dir()
+    data_dir = args.data_dir or default_data_dir()
     if not data_dir:
         print("Could not auto-detect the Termius data directory; pass --data-dir.", file=sys.stderr)
-        print("Common locations:\n  " + "\n  ".join(DEFAULT_DATA_DIRS), file=sys.stderr)
+        print("Looked in:\n  " + "\n  ".join(data_dir_candidates()), file=sys.stderr)
         return 2
 
     try:
