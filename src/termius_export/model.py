@@ -162,6 +162,35 @@ def slug(value: str, fallback: str) -> str:
     return (s or fallback)[:64]
 
 
+#: Reserved by Windows at every position in the filesystem, and reserved *by stem*: ``NUL.pem``
+#: is the null device exactly as ``NUL`` is. Opening one succeeds and writes nowhere, so a
+#: private key exported under such a name is discarded without an error, a file or a warning.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def file_slug(value: str, fallback: str) -> str:
+    """A ``slug`` that is also safe to use as a single path component.
+
+    ``slug`` answers "what may appear in a destination someone types at ssh", which is a
+    different question from "what may name a file", and it permits three answers to the second
+    that are not names at all. All three fail quietly:
+
+    - ``.`` and ``..`` denote the directory itself and its parent, so ``keys/.`` replaces the
+      key directory with a file and ``keys/..`` writes into the output root.
+    - A Windows device name is opened by the OS rather than created, so the key vanishes.
+    - A trailing dot is stripped by Windows, silently merging ``backup.`` and ``backup`` into
+      one file. Dropping it here instead hands the collision to the allocator, which can see it.
+
+    ``fallback`` is assumed to be a safe component; every caller derives it from a record id.
+    """
+    s = slug(value, fallback).rstrip(".")
+    if not s or s.split(".")[0].upper() in _WINDOWS_DEVICE_NAMES:
+        return fallback
+    return s
+
+
 #: Everything ssh will accept inside a destination. Runs of anything else collapse to a single
 #: ``-`` rather than ``_`` so that a label like "cce-<CJK>-<CJK>-192.0.2.1" comes out as
 #: "cce-192.0.2.1" instead of "cce-_-_-192.0.2.1".
