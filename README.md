@@ -178,10 +178,11 @@ Other outputs:
   store, the data directory auto-detected, all six formats emitted and self-checked. The macOS
   **App Store** build has not been exercised — it is sandboxed, so its data lives in an app
   container; the container is globbed rather than hard-coded, but the path is inferred
-- On macOS, aliases containing non-ASCII characters (CJK, for example) are refused by `ssh`
-  itself under a UTF-8 locale, so those hosts cannot be reached through the generated
-  `sshconfig` and the self-check reports them and exits non-zero. Every other output format is
-  unaffected. See [issue #4](https://github.com/y01and3/termius-export/issues/4)
+- Whether `ssh` accepts a non-ASCII alias depends on the C library, not on OpenSSH: glibc takes
+  one under any locale, macOS refuses one under any UTF-8 locale. Since a generated `sshconfig`
+  is meant to be portable, hosts whose name is not ASCII get a **second `Host` pattern** that
+  works everywhere — `Host 生产服务器 host-1`. The original is kept and listed first, so nothing
+  changes for anyone whose names were already ASCII
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
 - Passphrase-protected **PKCS#1 PEM** keys (`BEGIN RSA PRIVATE KEY` with `Proc-Type:

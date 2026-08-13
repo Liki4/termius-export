@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, "src")
 
-from termius_export.datadir import (  # noqa: E402
+from termius_export.datadir import (
     DEFAULT_DATA_DIR_GLOBS,
     DEFAULT_DATA_DIRS,
     candidates,

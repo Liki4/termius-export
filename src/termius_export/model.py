@@ -79,6 +79,14 @@ class Host:
     #: The source had no name for this host. Termius displays the address in that case,
     #: and alias generation mirrors that behaviour.
     label_was_empty: bool = False
+    #: A second, ASCII-only `Host` pattern, set only when `alias` is one ssh may refuse.
+    #: Empty when `alias` is already safe everywhere, which is the common case.
+    ascii_alias: str = ""
+
+    @property
+    def aliases(self) -> list[str]:
+        """Every `Host` pattern this host answers to, in the order they are written."""
+        return [self.alias, self.ascii_alias] if self.ascii_alias else [self.alias]
 
     @property
     def auth(self) -> str | None:
@@ -154,14 +162,52 @@ def slug(value: str, fallback: str) -> str:
     return (s or fallback)[:64]
 
 
+#: Everything ssh will accept inside a destination. Runs of anything else collapse to a single
+#: ``-`` rather than ``_`` so that a label like "cce-<CJK>-<CJK>-192.0.2.1" comes out as
+#: "cce-192.0.2.1" instead of "cce-_-_-192.0.2.1".
+_ASCII_STRIP = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: An alias ssh will take as a destination. Leading ``-`` is the one edge that fails: ssh
+#: rejects it outright ("hostname contains invalid characters"), and an unquoted one would be
+#: parsed as an option long before that. Measured, not assumed - ``.abc``, ``_abc``, ``1abc``,
+#: ``a..b`` and ``____`` are all accepted.
+_SSH_SAFE = re.compile(r"\A[A-Za-z0-9_.][A-Za-z0-9._-]*\Z")
+
+
+def is_ssh_safe(alias: str) -> bool:
+    """Whether ssh will accept ``alias`` as a destination on any platform.
+
+    Deliberately stricter than what the local ``ssh`` happens to allow. A generated sshconfig
+    is portable data - produced on one machine and used on another, which is most of the point
+    of this tool - and whether a non-ASCII destination is accepted turns out to depend on the C
+    library, not on OpenSSH: glibc accepts CJK under every locale, macOS rejects it under any
+    UTF-8 one. "Works where it was generated" is not the bar.
+    """
+    return bool(_SSH_SAFE.match(alias))
+
+
+def ascii_slug(value: str) -> str:
+    """An ASCII-only, ssh-safe form of ``value``, or ``""`` if nothing usable survives."""
+    s = _ASCII_STRIP.sub("-", str(value or "").strip())
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    s = s[:64].strip("-")
+    # A result of only dots and underscores is technically accepted by ssh but is not a name
+    # anyone can use; treat it as nothing survived and let the caller fall back.
+    return s if any(c.isalnum() for c in s) and is_ssh_safe(s) else ""
+
+
 class AliasAllocator:
-    """Allocates non-colliding Host aliases."""
+    """Allocates non-colliding Host aliases.
+
+    Both the original and the ASCII alias come from the same allocator, so an ASCII form can
+    never collide with another host's primary alias - which would silently route two hosts to
+    one entry.
+    """
 
     def __init__(self) -> None:
         self._used: set[str] = set()
 
-    def take(self, base: str, fallback: str = "host") -> str:
-        root = slug(base, fallback)
+    def _allocate(self, root: str) -> str:
         candidate = root
         n = 2
         while candidate in self._used:
@@ -169,3 +215,19 @@ class AliasAllocator:
             n += 1
         self._used.add(candidate)
         return candidate
+
+    def take(self, base: str, fallback: str = "host") -> str:
+        return self._allocate(slug(base, fallback))
+
+    def take_ascii(self, *candidates: str, fallback: str = "host") -> str:
+        """Allocate an ASCII alias from the first candidate that survives stripping.
+
+        Callers pass the label first and the address second: a label stripped of its non-ASCII
+        run is the more recognisable name, and falling back to the address mirrors what already
+        happens for a host the user never named.
+        """
+        for candidate in candidates:
+            root = ascii_slug(candidate)
+            if root:
+                return self._allocate(root)
+        return self._allocate(fallback)

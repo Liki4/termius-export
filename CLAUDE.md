@@ -183,33 +183,62 @@ makes `ssh` reject the entire config file** (`keyword identityfile extra argumen
 line`), not merely that one host. `_quote_path` in `writers/openssh.py` quotes exactly those
 paths, and leaves every space-free path byte-identical.
 
-### 5. `ssh` refuses a non-ASCII destination, and whether it does depends on the locale
+### 5. Whether `ssh` accepts an alias depends on the **C library**, not on OpenSSH
 
 Measured on macOS 26.2 with OpenSSH 10.0p2 against a real 213-host profile: **55 hosts had a
 non-ASCII alias, and not one of them could be reached through the generated `sshconfig`.**
 
 ```
-$ ssh -G -F out/sshconfig '<CJK alias>'
+$ ssh -G -F out/sshconfig -- '<CJK alias>'
 hostname contains invalid characters          # exit 255, stdout empty
 ```
 
 **The check is applied to the destination argument, before any config lookup.** `ssh -G -F
-/dev/null '<CJK alias>'` fails identically, and a matching `Host` block with an ASCII
-`HostName` does not rescue it. So no `ssh_config` content can fix this — only the alias can
-change.
+/dev/null -- '<CJK alias>'` fails identically, and a matching `Host` block with an ASCII
+`HostName` does not rescue it. So no `ssh_config` content can fix this — only the alias can.
 
-**It is locale-dependent**, which is why it stayed hidden through the Linux and Windows runs:
+The first read of this was "locale-dependent". That was too narrow. Same OpenSSH version, two
+libcs:
 
-| `LC_ALL` | `café` | `中文` |
-|---|---|---|
-| `C` | accepted | accepted |
-| `en_US.UTF-8` | accepted | rejected |
-| `zh_CN.UTF-8` | accepted | rejected |
+| | `C` | `en_US.UTF-8` | `zh_CN.UTF-8` |
+|---|---|---|---|
+| macOS 26.2, OpenSSH 10.0p2 | accepted | **rejected** | **rejected** |
+| Fedora 43, glibc 2.42, OpenSSH 10.0p2 | accepted | accepted | accepted |
 
-Latin-1 accented characters pass everywhere; CJK passes only under `C`. That is consistent with
-`valid_domain()` testing bytes with `isalnum()` against the locale's single-byte ctype table.
+Consistent with `valid_domain()` testing bytes with `isalnum()` against the locale's
+single-byte ctype table — the tables differ between libcs. Latin-1 accented characters such as
+`café` pass everywhere; CJK depends on both axes.
 
-**The first report of it named the wrong cause**, which cost a detour. `verify_openssh` read
+**This is why the fix belongs in the output, not in a runtime check.** A generated `sshconfig`
+is portable data: written on one machine, used on another, which is most of the point of this
+tool. "Works where it was generated" is not the bar.
+
+So each host gets a second `Host` pattern when its alias is one ssh may refuse:
+
+```
+Host A01<CJK> A01
+    HostName 192.0.2.11
+```
+
+Four decisions worth keeping:
+
+- **The ASCII form comes second.** If the original ever becomes valid everywhere, the file must
+  not have quietly trained people onto the derived name.
+- **Nothing is demoted to a comment.** `Host` takes several patterns, so the original alias is
+  still a real alias on every platform that accepts it.
+- **Both aliases come from the same `AliasAllocator`**, in two passes — every primary alias is
+  allocated before any ASCII fallback. A single pass would let a derived name take a name
+  another host wanted for itself and push that host to `-2`.
+- **A label that strips to nothing falls back to the address**, which is what `label_was_empty`
+  already does for a host the user never named. On the real profile that was 26 of the 55.
+
+`is_ssh_safe` is deliberately stricter than any one platform: ASCII only, and no leading `-`.
+The leading dash is its own small trap — ssh rejects it *and* would read it as an option first,
+so `verify.py` passes `--` before the destination. Without that, `ssh -G -F cfg -orig` parses
+as `-o rig` and fails with `no argument after keyword "rig"`: an error about the config file,
+for a problem that is entirely in the alias.
+
+**The first report of this named the wrong cause**, which cost a detour. `verify_openssh` read
 `.stdout` only, so an empty stdout became `<alias>: hostname` — a value mismatch that never
 happened. It now tests `returncode` first and reports ssh's own message under its own check,
 `openssh: alias accepted by ssh`. The parse probe had the same flaw in a nastier form: it used
@@ -217,15 +246,15 @@ happened. It now tests `returncode` first and reports ssh's own message under it
 report a perfectly good file as "ssh rejected the config" **and suppress every later check**.
 It now probes with a fixed valid destination.
 
+Verification tries **every** pattern rather than stopping at the first that works. Checking only
+the original would leave the ASCII alias unverified on a libc that accepts the original — which
+is exactly the platform where it is never exercised in anger, and so exactly where it would rot
+unnoticed.
+
 A related trap in the same family, latent rather than active: `slug()` used to permit `@`, and
 ssh reads `@` in a destination as the user separator. `Host root@gateway` plus `ssh
 root@gateway` resolves to user `root` on a host named `gateway` — a different machine, no
 error. `@` is now replaced like any other unsafe character.
-
-Alias generation itself is **not** fixed: `slug()` still keeps CJK, so those `Host` entries are
-still emitted and still unusable under a UTF-8 locale. The export says so plainly and exits
-non-zero. Which way to fix it changes every existing user's output, so it is being decided
-upstream rather than unilaterally.
 
 ---
 
@@ -257,6 +286,18 @@ Tests requiring a real Windows API call are guarded with
 `datadir`, and why the "wrong key" message lives in `localkey`. When something in `cli` needs
 a test, move it out rather than importing `cli`.
 
+`normalize` **is** importable, and deliberately so: its two references to `Decryptor` and
+`RawTables` are annotations only, so they sit under `if TYPE_CHECKING` and the heavy modules
+never load. `build_model` takes both objects as arguments and constructs neither, so a test can
+pass a stub whose whole contract is `walk()` and `stats`. That module holds the trickiest logic
+in the project; leaving it untestable to save two import lines was a bad trade.
+
+`ruff`'s findings in `tests/` are silenced per-file rather than worked around. `E402` is
+unavoidable — `sys.path.insert(0, "src")` has to run before the package is imported, which is
+the property that lets the suite run from a bare checkout. `UP012` is redundant to Python but
+load-bearing to the reader: those tests assert *which* encoding was produced, so spelling out
+`.encode("utf-8")` is the assertion.
+
 ## Writer plugin interface
 
 ```python
@@ -285,6 +326,13 @@ worse than no config file at all — someone will point it at a production host.
 
 Labelling this honestly is non-negotiable. `verify.py` reports Tabby's round-trip check as
 `skipped` rather than `pass` for exactly this reason.
+
+**`roundtrip` means the round-trip that ran, not a guarantee for every environment.** OpenSSH is
+labelled `roundtrip` and has earned it — the round-trip is what caught trap 5 — but it validates
+the aliases *the local `ssh` accepts*, and which aliases those are depends on the C library. A
+writer whose correctness varies by platform should say so here rather than let the label imply
+more than was measured. A check that only ever confirms what you already believe is not doing
+anything.
 
 ### Adding a writer
 
@@ -430,10 +478,10 @@ whole project, and one that would keep breaking as Chromium evolves.
   OpenSSH 10.0p2: data directory auto-detected at `~/Library/Application Support/Termius`,
   `localKey` read from the login keychain, the whole corpus decrypted, all six formats emitted,
   and POSIX modes measured rather than assumed (`out` 0700, `keys/` 0700, private keys 0600,
-  `sshconfig` and `hosts.csv` 0600) with no hardening warnings. Two caveats belong with it: a
-  keychain authorization dialog appears on first run (trap 3), and 55 of the 213 hosts have a
-  non-ASCII alias that ssh refuses under a UTF-8 locale, so the export correctly exits non-zero
-  (trap 5)
+  `sshconfig` and `hosts.csv` 0600) with no hardening warnings. One caveat belongs with it: a
+  keychain authorization dialog appears on first run (trap 3). All 213 hosts are reachable
+  through the generated `sshconfig`, 55 of them via the ASCII alias that this platform's ssh
+  requires (trap 5)
 - The App Store build's data path is still **inferred**. Its bundle id is evidenced as
   `com.termius.mac` — a leftover Group Container and a leftover `Termius (MAS)` keychain item on
   a machine that had migrated to the DMG build share a creation date — but no sandboxed

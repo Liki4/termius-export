@@ -12,9 +12,28 @@ Miss any hop and the username and key both come out empty.
 
 from __future__ import annotations
 
-from .crypto import Decryptor
-from .model import AliasAllocator, Forward, Host, Key, KnownHost, Model, Proxy, expand_packed_ipv4, slug
-from .source import RawTables
+from typing import TYPE_CHECKING
+
+from .model import (
+    AliasAllocator,
+    Forward,
+    Host,
+    Key,
+    KnownHost,
+    Model,
+    Proxy,
+    expand_packed_ipv4,
+    is_ssh_safe,
+    slug,
+)
+
+if TYPE_CHECKING:
+    # Annotations only, and `from __future__ import annotations` keeps them strings at runtime.
+    # Importing these eagerly would drag PyNaCl and ccl_chromium_reader into this module and
+    # put it out of reach of the test suite, which has to run on a bare checkout. `dec` and
+    # `tables` are passed in; nothing here constructs either.
+    from .crypto import Decryptor
+    from .source import RawTables
 
 
 def _index(rows: list[dict]) -> dict[str, dict]:
@@ -163,6 +182,14 @@ def build_model(tables: RawTables, dec: Decryptor, *, source_info: dict | None =
         )
         hosts.append(host)
         hosts_by_entity[host.id] = host
+
+    # Second pass, deliberately. Every primary alias is allocated before any ASCII fallback is,
+    # so a derived name can never take a name some other host wanted for itself and push that
+    # host to "-2". Interleaving the two would make a plain ASCII-named host answer to a
+    # suffixed alias because of an unrelated host that happened to be read earlier.
+    for host in hosts:
+        if not is_ssh_safe(host.alias):
+            host.ascii_alias = aliases.take_ascii(host.label, host.address)
 
     hosts.sort(key=lambda h: h.alias.lower())
 

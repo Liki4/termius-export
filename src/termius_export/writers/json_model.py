@@ -32,6 +32,9 @@ class JsonWriter:
             "hosts": [
                 {
                     "alias": h.alias,
+                    # Present only when the alias is one ssh may refuse; consumers that need a
+                    # name safe on every platform should prefer it when it is there.
+                    "ascii_alias": h.ascii_alias,
                     "label": h.label,
                     "address": h.address,
                     "port": h.port,

@@ -33,3 +33,13 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# E402: every test does `sys.path.insert(0, "src")` before importing the package, so its
+#   imports cannot be at the top of the file. The suite runs straight from a checkout with
+#   nothing installed, which is the property that makes it work on a bare Windows box.
+# UP012: `"...".encode("utf-8")` is redundant to Python and load-bearing to the reader here.
+#   These tests assert *which* encoding was produced -- test_localkey disambiguates UTF-8 from
+#   UTF-16 credential blobs, test_newlines checks the file was written as UTF-8 -- so dropping
+#   the argument would make the assertion say less than it means.
+"tests/*" = ["E402", "UP012"]
