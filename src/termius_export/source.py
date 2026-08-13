@@ -66,7 +66,8 @@ def locate_leveldb(path: str | pathlib.Path) -> pathlib.Path:
         f"No IndexedDB found under {p}. Point --data-dir at the Termius data directory, e.g.\n"
         "  Linux (snap):  ~/snap/termius-app/current/.config/Termius\n"
         "  Linux (other): ~/.config/Termius\n"
-        "  macOS:         ~/Library/Application Support/Termius"
+        "  macOS:         ~/Library/Application Support/Termius\n"
+        "  Windows:       %APPDATA%\\Termius"
     )
 
 

@@ -13,7 +13,7 @@ Miss any hop and the username and key both come out empty.
 from __future__ import annotations
 
 from .crypto import Decryptor
-from .model import AliasAllocator, Forward, Host, Key, KnownHost, Model, Proxy, slug
+from .model import AliasAllocator, Forward, Host, Key, KnownHost, Model, Proxy, expand_packed_ipv4, slug
 from .source import RawTables
 
 
@@ -124,7 +124,9 @@ def build_model(tables: RawTables, dec: Decryptor, *, source_info: dict | None =
             key.linked = True
 
         label = _text(row.get("label"))
-        address = _text(row.get("address"))
+        # Some hosts store the address as a packed 32-bit integer; expand it before it reaches
+        # the alias or any writer. See expand_packed_ipv4.
+        address = expand_packed_ipv4(_text(row.get("address")))
 
         proxy = None
         proxy_row = _deref(cfg.get("proxycommand"), proxies)

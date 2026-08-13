@@ -42,6 +42,7 @@ verify.py     read outputs back, compare against the model
 | `source.py` | Read Chromium IndexedDB, deduplicate records |
 | `crypto.py` | XSalsa20-Poly1305 decryption, version-header validation |
 | `localkey.py` | Fetch `localKey` from the platform keyring |
+| `fsperm.py` | Platform-dependent filesystem writes and permission hardening |
 | `normalize.py` | Resolve Termius entity references, produce a `Model` |
 | `model.py` | Dataclasses for the intermediate model |
 | `writers/` | One writer per target client |
@@ -73,9 +74,9 @@ Two rules enforced in `crypto.py`:
 
 ---
 
-## Three traps
+## Four traps
 
-All three were hit during development. Don't rediscover them.
+All four were hit during development. Don't rediscover them.
 
 ### 1. LevelDB holds multiple generations of the same record
 
@@ -124,6 +125,66 @@ security find-generic-password -s Termius -a localKey -w       # macOS
 ```
 
 ---
+
+### 4. Windows needs four separate things, and none of them show up on Linux
+
+Measured on a real install, not assumed:
+
+- **The keyring service name is `Termius`**, and Credential Manager's target is
+  `Termius/localKey` — keytar's `{service}/{account}` form. `CANDIDATE_SERVICES` already
+  contained `Termius`, so only a backend was needed, not a new service name.
+- **`os.chmod` is a no-op on Windows.** It can only toggle the read-only attribute, so `0600`
+  on a private key silently protects nothing. `fsperm.py` uses `icacls` with the user's
+  **SID** — well-known principal names are localized, so an English literal fails on a
+  non-English Windows.
+- **`Path.write_text` translates newlines.** The default `newline=None` turns every `\n` into
+  `os.linesep`, producing CRLF private keys and, because `csv.writer` already emits `\r\n`, a
+  `hosts.csv` full of `\r\r\n`. `fsperm.write_private` passes `newline="\n"`.
+- **`subprocess(text=True)` decodes with the locale ANSI codepage, not UTF-8.** On a Chinese
+  Windows that is GBK. `slug()` keeps CJK characters — Python's `\w` is Unicode-aware — so a
+  Chinese Termius label becomes a Chinese ssh alias, `ssh -G` echoes it back as the UTF-8
+  bytes we wrote, and GBK cannot decode them. The failure is nasty: `UnicodeDecodeError` is
+  raised *inside subprocess's reader thread*, so `stdout` is silently left as `None` and the
+  real traceback is `'NoneType' object has no attribute 'splitlines'` somewhere unrelated.
+
+  `verify.py::_run` decodes as UTF-8 with `errors="replace"`, matching what we wrote.
+  `fsperm`'s calls deliberately do **not**: `whoami` and `icacls` are Windows console programs
+  that emit the console codepage, so they keep the locale default and only add
+  `errors="replace"`.
+
+The last three are invisible on Linux, where `chmod` works, `os.linesep` is already `\n`, and
+the locale is UTF-8. Testing on the development platform cannot surface them.
+
+One more, measured with the real parser: an **unquoted `IdentityFile` path containing a space
+makes `ssh` reject the entire config file** (`keyword identityfile extra arguments at end of
+line`), not merely that one host. `_quote_path` in `writers/openssh.py` quotes exactly those
+paths, and leaves every space-free path byte-identical.
+
+**`Local State`'s `os_crypt.encrypted_key` is not the localKey.** It base64-decodes to a
+`DPAPI` prefix and is Chromium's own cookie / Local-Storage key, present in every Electron
+app. Do not investigate it again.
+
+---
+
+## Tests
+
+`tests/` uses the standard library's `unittest`, deliberately — not pytest.
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+Two reasons. The suite needs no install, and `localkey`, `model`, `fsperm` and every writer
+import with stdlib alone, so it runs on a bare Python without `pynacl` or
+`ccl_chromium_reader`. More importantly it runs unmodified **on Windows**, so the pure Windows
+logic is exercised natively rather than only simulated from Linux.
+
+Tests requiring a real Windows API call are guarded with
+`@unittest.skipUnless(sys.platform == "win32", ...)`.
+
+**Never import `cli`, `crypto` or `source` from a test** — they pull `pynacl` /
+`ccl_chromium_reader` and will fail to import on a bare checkout. This is why
+`write_private` lives in `fsperm` rather than `cli`.
 
 ## Writer plugin interface
 
@@ -186,13 +247,38 @@ Labelling this honestly is non-negotiable. `verify.py` reports Tabby's round-tri
 | known_hosts | `ssh-keygen -F <host> -f <file>` per entry — OpenSSH's own known_hosts parser |
 | Private keys | `ssh-keygen -l -f` on every emitted key, confirming they are real, parseable keys |
 
+Two traps in that table, both found by a 213-host real-world export rather than by reading:
+
+- **`ssh -G` lower-cases the hostname.** Comparing it case-sensitively against the model
+  reports every host with an uppercase address as a mismatch. DNS is case-insensitive.
+- **`ssh-keygen -l -f <private>` silently falls back to `<private>.pub`.** Any test of the
+  private-key path must delete the `.pub` first, or it proves nothing. This is how the
+  passphrase-protected PKCS#1 PEM case stayed hidden: those keys encrypt the public modulus
+  too, so without the `.pub` ssh-keygen reports `is not a key file` — the same message as for
+  genuine corruption. `_is_encrypted_pem` separates them, and such keys are reported as
+  **skipped**, never as passed.
+
+A check that reports a false failure is worse than no check: it teaches people to ignore the
+whole verification pass.
+
+**Not every mismatch is a false alarm, though.** The same export reported two hosts whose
+address was `3221226008` rather than `192.0.2.24` — Termius stores some addresses as a packed
+32-bit integer. ssh coped, because `inet_aton` accepts a bare 32-bit number, so the sshconfig
+worked and only the readback disagreed. But the packed form would have reached Tabby, Termix,
+CSV and JSON, whose consumers do *not* cope: Node's `net.connect` treats `"3221226008"` as a
+name to resolve and the lookup fails. `model.py::expand_packed_ipv4` normalises it. The
+lesson is that a readback mismatch is a symptom, not a diagnosis — chase it to the cause
+before deciding which side is wrong.
+
 The CLI exits non-zero if any check fails.
 
 ---
 
 ## Security posture
 
-- Output directory `0700`, private keys `0600`, process `umask 077`
+- Output directory `0700`, private keys `0600`, process `umask 077` — **on POSIX**. Windows
+  gets an equivalent via `icacls`; see trap 4. Everything goes through `fsperm`, so the
+  platform difference lives in one file rather than being scattered through `cli.py`
 - **No extra plaintext intermediate files.** Decrypted data only ever exists in memory
 - `--no-secrets` exports structure without passwords or passphrases
 - **Orphaned keys are still written out** to `keys-unlinked/`, never silently dropped. Its
@@ -257,8 +343,15 @@ whole project, and one that would keep breaking as Chromium evolves.
 
 ## Known limitations
 
-- Fully verified only on Linux (snap install). The macOS and Windows path/keyring branches follow
-  platform conventions but have not been exercised on real hardware
+- Verified on Linux (snap install) and on Windows. The Windows evidence is a real 213-host /
+  22-key / 264-known_hosts profile on a Chinese-localized Windows with Python 3.12: `localKey`
+  read from Credential Manager (blob encoding measured as UTF-8), all six formats emitted, and
+  every self-check passing with no hardening warnings. The resulting ACL was inspected rather
+  than assumed: `icacls out\keys` showed a single ACE, `<HOST>\<user>:(OI)(CI)(F)` — inherited
+  entries stripped, no `Authenticated Users` or `BUILTIN\Users`. The macOS path/keyring branch
+  follows platform conventions but has not been exercised on real hardware
+- The localization matters to that evidence: it is what exposed the `icacls`-principal and
+  GBK-decoding traps. A run on an English Windows would not have caught either
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated
 - The Tabby writer has not been round-trip verified; see the `verified` table above

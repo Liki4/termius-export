@@ -8,6 +8,7 @@ finds nothing — an easy trap.
 
 from __future__ import annotations
 
+import base64
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,42 @@ CANDIDATE_SERVICES = (
 
 ACCOUNT = "localKey"
 
+#: localKey is a NaCl secretbox key: base64 of exactly 32 bytes.
+LOCAL_KEY_BYTES = 32
+
+#: Which blob encoding actually worked, per service. Reported in the run summary so the first
+#: real Windows run measures this instead of leaving it an assumption.
+_LAST_BLOB_ENCODING: dict[str, str] = {}
+
 
 class LocalKeyNotFound(Exception):
     pass
+
+
+def _looks_like_local_key(value: str) -> bool:
+    try:
+        return len(base64.b64decode(value, validate=True)) == LOCAL_KEY_BYTES
+    except Exception:  # noqa: BLE001 - any decoding problem means "not a key"
+        return False
+
+
+def _decode_credential_blob(blob: bytes) -> tuple[str, str]:
+    """Decode a Windows CredentialBlob into ``(key, encoding_label)``.
+
+    The blob is raw bytes and Credential Manager declares no encoding. keytar writes UTF-8,
+    but that cannot be confirmed without a Windows machine, so rather than assume, candidate
+    encodings are disambiguated by the key's known shape - the same "use the known plaintext"
+    technique that produced the cipher format. The label is reported in the run summary, so
+    the first real Windows run turns this from an assumption into a measurement.
+    """
+    for label in ("utf-8", "utf-16-le"):
+        try:
+            candidate = blob.decode(label).strip()
+        except UnicodeDecodeError:
+            continue
+        if _looks_like_local_key(candidate):
+            return candidate, label
+    return blob.decode("utf-8", errors="replace").strip(), "utf-8 (unvalidated)"
 
 
 def _from_secret_tool(service: str) -> str | None:
@@ -61,13 +95,133 @@ def _from_macos_keychain(service: str) -> str | None:
     return out.stdout.strip() or None
 
 
+def _from_credential_manager(service: str) -> str | None:
+    """Windows: read the generic credential keytar writes.
+
+    ``ctypes`` is used rather than a PowerShell subprocess because ``cmdkey`` cannot print a
+    credential blob - reading one needs ``CredReadW`` either way, and going through PowerShell
+    would mean compiling C# at runtime via ``Add-Type``: slow, frequently flagged by
+    antivirus, and blocked outright by some execution policies. The ``keyring`` package was
+    also rejected, since it would rewrite the Linux and macOS paths that are already verified.
+
+    Everything ctypes-related is imported inside this function on purpose: ``ctypes.wintypes``
+    raises on non-Windows, so importing it at module scope would break the module everywhere
+    else.
+    """
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    import ctypes.wintypes
+
+    CRED_TYPE_GENERIC = 1
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", ctypes.wintypes.DWORD),
+            ("dwHighDateTime", ctypes.wintypes.DWORD),
+        ]
+
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", ctypes.wintypes.DWORD),
+            ("Type", ctypes.wintypes.DWORD),
+            ("TargetName", ctypes.wintypes.LPWSTR),
+            ("Comment", ctypes.wintypes.LPWSTR),
+            ("LastWritten", FILETIME),
+            ("CredentialBlobSize", ctypes.wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_char)),
+            ("Persist", ctypes.wintypes.DWORD),
+            ("AttributeCount", ctypes.wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", ctypes.wintypes.LPWSTR),
+            ("UserName", ctypes.wintypes.LPWSTR),
+        ]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.CredReadW.argtypes = [
+        ctypes.wintypes.LPCWSTR,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(CREDENTIAL)),
+    ]
+    advapi32.CredReadW.restype = ctypes.wintypes.BOOL
+    advapi32.CredFree.argtypes = [ctypes.c_void_p]
+    advapi32.CredFree.restype = None
+
+    # keytar's target format. Measured on a real install: target=Termius/localKey.
+    target = f"{service}/{ACCOUNT}"
+    pcred = ctypes.POINTER(CREDENTIAL)()
+    if not advapi32.CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(pcred)):
+        return None
+
+    try:
+        cred = pcred.contents
+        blob = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+    finally:
+        advapi32.CredFree(pcred)
+
+    value, encoding = _decode_credential_blob(blob)
+    if not value:
+        return None
+    _LAST_BLOB_ENCODING[service] = encoding
+    return value
+
+
 def _available_backends() -> list[tuple[str, object]]:
     backends: list[tuple[str, object]] = []
     if shutil.which("secret-tool"):
         backends.append(("secret-tool", _from_secret_tool))
     if sys.platform == "darwin" and shutil.which("security"):
         backends.append(("macOS keychain", _from_macos_keychain))
+    if sys.platform == "win32":
+        # advapi32 ships with Windows, so this backend is always available.
+        backends.append(("Windows Credential Manager", _from_credential_manager))
     return backends
+
+
+def _not_found_message(backend_names: list[str], platform: str | None = None) -> str:
+    """The "a backend works but holds no key" message, per platform.
+
+    The POSIX text is kept verbatim: Linux is the verified platform and macOS is validated on
+    a separate track, so neither may drift as part of a Windows change.
+    """
+    platform = sys.platform if platform is None else platform
+    tried = ", ".join(backend_names)
+
+    if platform == "win32":
+        targets = ", ".join(f"{s}/{ACCOUNT}" for s in CANDIDATE_SERVICES)
+        return (
+            f"A credential backend is available ({tried}) but it holds no Termius localKey.\n"
+            f"Tried target names: {targets}.\n"
+            "\n"
+            "Most likely causes:\n"
+            "  - Termius has never been launched on this machine (the key is created on first run)\n"
+            "  - the export is running as a different Windows user than the one that runs Termius\n"
+            "  - Termius stores it under a target name not in the list above\n"
+            "\n"
+            "Check by hand, in PowerShell:\n"
+            "  cmdkey /list | Select-String termius\n"
+            "\n"
+            "If the target name differs from those tried above, please report it. Otherwise\n"
+            "read the key out yourself and pass it in via --local-key-file."
+        )
+
+    return (
+        f"A keyring client is available ({tried}) but it holds no Termius localKey.\n"
+        f"Tried service names: {', '.join(CANDIDATE_SERVICES)} with account={ACCOUNT}.\n"
+        "\n"
+        "Most likely causes:\n"
+        "  - Termius has never been launched on this machine (the key is created on first run)\n"
+        "  - the keyring is locked; unlock it and retry\n"
+        "  - Termius stores it under a service name not in the list above\n"
+        "\n"
+        "Check by hand:\n"
+        "  secret-tool lookup service termius-app account localKey        # Linux\n"
+        "  security find-generic-password -s Termius -a localKey -w       # macOS\n"
+        "\n"
+        "Then pass the value via --local-key-file."
+    )
 
 
 def find_local_key() -> tuple[str, str]:
@@ -100,24 +254,13 @@ def find_local_key() -> tuple[str, str]:
         for backend, fn in backends:
             value = fn(service)
             if value:
-                return value, f"{backend} (service={service}, account={ACCOUNT})"
+                detail = f"{backend} (service={service}, account={ACCOUNT}"
+                encoding = _LAST_BLOB_ENCODING.get(service)
+                if encoding:
+                    detail += f", blob encoding={encoding}"
+                return value, detail + ")"
 
-    tried = ", ".join(name for name, _ in backends)
-    raise LocalKeyNotFound(
-        f"A keyring client is available ({tried}) but it holds no Termius localKey.\n"
-        f"Tried service names: {', '.join(CANDIDATE_SERVICES)} with account={ACCOUNT}.\n"
-        "\n"
-        "Most likely causes:\n"
-        "  - Termius has never been launched on this machine (the key is created on first run)\n"
-        "  - the keyring is locked; unlock it and retry\n"
-        "  - Termius stores it under a service name not in the list above\n"
-        "\n"
-        "Check by hand:\n"
-        "  secret-tool lookup service termius-app account localKey        # Linux\n"
-        "  security find-generic-password -s Termius -a localKey -w       # macOS\n"
-        "\n"
-        "Then pass the value via --local-key-file."
-    )
+    raise LocalKeyNotFound(_not_found_message([name for name, _ in backends]))
 
 
 def load_local_key(path: str | None) -> tuple[str, str]:
