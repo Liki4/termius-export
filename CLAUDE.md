@@ -42,6 +42,7 @@ verify.py     read outputs back, compare against the model
 | `source.py` | Read Chromium IndexedDB, deduplicate records |
 | `crypto.py` | XSalsa20-Poly1305 decryption, version-header validation |
 | `localkey.py` | Fetch `localKey` from the platform keyring |
+| `datadir.py` | Locate Termius's data directory, per platform and install type |
 | `fsperm.py` | Platform-dependent filesystem writes and permission hardening |
 | `normalize.py` | Resolve Termius entity references, produce a `Model` |
 | `model.py` | Dataclasses for the intermediate model |
@@ -74,9 +75,10 @@ Two rules enforced in `crypto.py`:
 
 ---
 
-## Four traps
+## Five traps
 
-All four were hit during development. Don't rediscover them.
+All five were hit during development, the last one only once a Mac was involved. Don't
+rediscover them.
 
 ### 1. LevelDB holds multiple generations of the same record
 
@@ -124,6 +126,23 @@ secret-tool lookup service termius-app account localKey        # Linux
 security find-generic-password -s Termius -a localKey -w       # macOS
 ```
 
+Two things measured on a real Mac, both absent on Linux:
+
+- **macOS prompts for authorization.** Reading an item created by another application raises a
+  GUI Allow / Always Allow / Deny dialog, and the export blocks until it is answered. A miss
+  returns in 0.04 s; a hit took 5–9 s, which is the dialog waiting. `secret-tool` has no such
+  step, so this is the one place where "reads the key from the OS keyring" needs a caveat.
+  Note that *Always Allow* grants trust to `/usr/bin/security` — that is, to anything that
+  shells out to it, not to this tool. It is also an argument for keeping the subprocess
+  design: ACL trust is per-binary, so a ctypes/Security.framework port would be granted as
+  whichever `python3` ran it and would re-prompt whenever that changed.
+- **A machine can hold several entries, with different keys.** Moving between the DMG and App
+  Store builds leaves the old one behind. One real Mac held `Termius` *and* `Termius (MAS)`,
+  both `account=localKey`, both valid 32-byte keys, and the two **differed**. `CANDIDATE_SERVICES`
+  tries `Termius` first, which is right for a DMG install and wrong for the mirror case. The
+  failure is loud — secretbox verifies a MAC — but `cli.py` used to let `DecryptionFailed`
+  escape as a bare traceback; it now prints `localkey.wrong_key_message`.
+
 ---
 
 ### 4. Windows needs four separate things, and none of them show up on Linux
@@ -152,6 +171,10 @@ Measured on a real install, not assumed:
   that emit the console codepage, so they keep the locale default and only add
   `errors="replace"`.
 
+  **Caveat added after the first macOS run:** that `ssh -G` echoed the CJK alias back at all
+  was a *locale artifact*, not a property of ssh. Do not read this bullet as evidence that
+  non-ASCII aliases work — see trap 5.
+
 The last three are invisible on Linux, where `chmod` works, `os.linesep` is already `\n`, and
 the locale is UTF-8. Testing on the development platform cannot surface them.
 
@@ -159,6 +182,52 @@ One more, measured with the real parser: an **unquoted `IdentityFile` path conta
 makes `ssh` reject the entire config file** (`keyword identityfile extra arguments at end of
 line`), not merely that one host. `_quote_path` in `writers/openssh.py` quotes exactly those
 paths, and leaves every space-free path byte-identical.
+
+### 5. `ssh` refuses a non-ASCII destination, and whether it does depends on the locale
+
+Measured on macOS 26.2 with OpenSSH 10.0p2 against a real 213-host profile: **55 hosts had a
+non-ASCII alias, and not one of them could be reached through the generated `sshconfig`.**
+
+```
+$ ssh -G -F out/sshconfig '<CJK alias>'
+hostname contains invalid characters          # exit 255, stdout empty
+```
+
+**The check is applied to the destination argument, before any config lookup.** `ssh -G -F
+/dev/null '<CJK alias>'` fails identically, and a matching `Host` block with an ASCII
+`HostName` does not rescue it. So no `ssh_config` content can fix this — only the alias can
+change.
+
+**It is locale-dependent**, which is why it stayed hidden through the Linux and Windows runs:
+
+| `LC_ALL` | `café` | `中文` |
+|---|---|---|
+| `C` | accepted | accepted |
+| `en_US.UTF-8` | accepted | rejected |
+| `zh_CN.UTF-8` | accepted | rejected |
+
+Latin-1 accented characters pass everywhere; CJK passes only under `C`. That is consistent with
+`valid_domain()` testing bytes with `isalnum()` against the locale's single-byte ctype table.
+
+**The first report of it named the wrong cause**, which cost a detour. `verify_openssh` read
+`.stdout` only, so an empty stdout became `<alias>: hostname` — a value mismatch that never
+happened. It now tests `returncode` first and reports ssh's own message under its own check,
+`openssh: alias accepted by ssh`. The parse probe had the same flaw in a nastier form: it used
+`model.hosts[0].alias`, so a profile whose alphabetically first alias is one ssh rejects would
+report a perfectly good file as "ssh rejected the config" **and suppress every later check**.
+It now probes with a fixed valid destination.
+
+A related trap in the same family, latent rather than active: `slug()` used to permit `@`, and
+ssh reads `@` in a destination as the user separator. `Host root@gateway` plus `ssh
+root@gateway` resolves to user `root` on a host named `gateway` — a different machine, no
+error. `@` is now replaced like any other unsafe character.
+
+Alias generation itself is **not** fixed: `slug()` still keeps CJK, so those `Host` entries are
+still emitted and still unusable under a UTF-8 locale. The export says so plainly and exits
+non-zero. Which way to fix it changes every existing user's output, so it is being decided
+upstream rather than unilaterally.
+
+---
 
 **`Local State`'s `os_crypt.encrypted_key` is not the localKey.** It base64-decodes to a
 `DPAPI` prefix and is Chromium's own cookie / Local-Storage key, present in every Electron
@@ -184,7 +253,9 @@ Tests requiring a real Windows API call are guarded with
 
 **Never import `cli`, `crypto` or `source` from a test** — they pull `pynacl` /
 `ccl_chromium_reader` and will fail to import on a bare checkout. This is why
-`write_private` lives in `fsperm` rather than `cli`.
+`write_private` lives in `fsperm` rather than `cli`, why data-directory resolution lives in
+`datadir`, and why the "wrong key" message lives in `localkey`. When something in `cli` needs
+a test, move it out rather than importing `cli`.
 
 ## Writer plugin interface
 
@@ -239,7 +310,7 @@ Labelling this honestly is non-negotiable. `verify.py` reports Tabby's round-tri
 
 | Format | How it is verified |
 |---|---|
-| OpenSSH | `ssh -G -F <file> <alias>` — let ssh itself parse it, then compare its resolved hostname/port/user per host |
+| OpenSSH | `ssh -G -F <file> <alias>` — let ssh itself parse it, then compare its resolved hostname/port/user per host. Reported as two checks: whether ssh *accepted* the alias, and whether the values it resolved match |
 | JSON | `json.load` round-trip, compare host and key counts |
 | CSV | `csv.DictReader` round-trip, compare addresses row by row |
 | Tabby | Structural check (entry count, quote balance); round-trip import reported as `skipped` |
@@ -247,10 +318,13 @@ Labelling this honestly is non-negotiable. `verify.py` reports Tabby's round-tri
 | known_hosts | `ssh-keygen -F <host> -f <file>` per entry — OpenSSH's own known_hosts parser |
 | Private keys | `ssh-keygen -l -f` on every emitted key, confirming they are real, parseable keys |
 
-Two traps in that table, both found by a 213-host real-world export rather than by reading:
+Three traps in that table, all found by a 213-host real-world export rather than by reading:
 
 - **`ssh -G` lower-cases the hostname.** Comparing it case-sensitively against the model
   reports every host with an uppercase address as a mismatch. DNS is case-insensitive.
+- **A non-zero exit is not a value mismatch.** Reading `.stdout` alone silently turns "ssh
+  refused to run" into "the hostname disagreed", which is a true failure reported under a false
+  cause. Check `returncode` before comparing anything. See trap 5.
 - **`ssh-keygen -l -f <private>` silently falls back to `<private>.pub`.** Any test of the
   private-key path must delete the `.pub` first, or it proves nothing. This is how the
   passphrase-protected PKCS#1 PEM case stayed hidden: those keys encrypt the public modulus
@@ -348,10 +422,23 @@ whole project, and one that would keep breaking as Chromium evolves.
   read from Credential Manager (blob encoding measured as UTF-8), all six formats emitted, and
   every self-check passing with no hardening warnings. The resulting ACL was inspected rather
   than assumed: `icacls out\keys` showed a single ACE, `<HOST>\<user>:(OI)(CI)(F)` — inherited
-  entries stripped, no `Authenticated Users` or `BUILTIN\Users`. The macOS path/keyring branch
-  follows platform conventions but has not been exercised on real hardware
+  entries stripped, no `Authenticated Users` or `BUILTIN\Users`
 - The localization matters to that evidence: it is what exposed the `icacls`-principal and
   GBK-decoding traps. A run on an English Windows would not have caught either
+- **macOS: the DMG build is verified; the App Store build is not.** The DMG evidence is a real
+  213-host / 22-key / 264-known_hosts profile on macOS 26.2 (arm64) with Python 3.12 and
+  OpenSSH 10.0p2: data directory auto-detected at `~/Library/Application Support/Termius`,
+  `localKey` read from the login keychain, the whole corpus decrypted, all six formats emitted,
+  and POSIX modes measured rather than assumed (`out` 0700, `keys/` 0700, private keys 0600,
+  `sshconfig` and `hosts.csv` 0600) with no hardening warnings. Two caveats belong with it: a
+  keychain authorization dialog appears on first run (trap 3), and 55 of the 213 hosts have a
+  non-ASCII alias that ssh refuses under a UTF-8 locale, so the export correctly exits non-zero
+  (trap 5)
+- The App Store build's data path is still **inferred**. Its bundle id is evidenced as
+  `com.termius.mac` — a leftover Group Container and a leftover `Termius (MAS)` keychain item on
+  a machine that had migrated to the DMG build share a creation date — but no sandboxed
+  container was available to read. `datadir.py` globs the container rather than hard-coding
+  that id, so being wrong about it costs less
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated
 - The Tabby writer has not been round-trip verified; see the `verified` table above

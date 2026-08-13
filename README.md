@@ -48,6 +48,12 @@ python -m termius_export --out out
 Auto-detects the data directory, reads the decryption key from the OS keyring, emits every format
 and self-verifies.
 
+**On macOS, expect a keychain prompt.** The key was written by Termius, so reading it from
+anything else raises the system's Allow / Always Allow / Deny dialog, once per keychain entry.
+The export waits for it. Choosing *Always Allow* grants the trust to `/usr/bin/security` — that
+is, to anything on the machine that shells out to it — and is revocable in Keychain Access under
+the entry's **Access Control** tab.
+
 ```bash
 # only some formats, and no plaintext passwords
 python -m termius_export --format openssh,tabby --no-secrets
@@ -88,6 +94,16 @@ python -m termius_export --local-key-file localkey.txt --out out
 The service name is `termius-app` for snap installs and `Termius` on macOS — Termius uses its
 executable name, which is why looking up "Termius" on a snap install finds nothing. Any keyring
 browser (Seahorse, KWalletManager) can show the entry too.
+
+**A third case, if the export stops with "it does not decrypt this data".** A key was found, but
+the wrong one. Moving between the macOS App Store and DMG builds leaves the old keychain entry
+behind, and the two hold different keys. List what you actually have, then pass the right one in
+with `--local-key-file`:
+
+```bash
+security dump-keychain | grep -i termius            # macOS
+secret-tool search --all service termius-app        # Linux
+```
 
 On Windows the key lives in Credential Manager under the target `Termius/localKey`. The tool
 reads it directly via `CredReadW`; to confirm the entry exists:
@@ -157,10 +173,15 @@ Other outputs:
 
 ## Limitations
 
-- Verified on Linux (snap install) and on Windows. The Windows run was a real 213-host,
-  22-key profile on a Chinese-localized Windows with Python 3.12: `localKey` read from
-  Credential Manager, all six formats emitted, and every self-check passing. The macOS branch
-  follows platform conventions but has not been exercised on real hardware
+- Verified on Linux (snap install), on Windows, and on macOS (DMG build). Both the Windows and
+  macOS runs were real 213-host, 22-key profiles: the key read from the platform credential
+  store, the data directory auto-detected, all six formats emitted and self-checked. The macOS
+  **App Store** build has not been exercised — it is sandboxed, so its data lives in an app
+  container; the container is globbed rather than hard-coded, but the path is inferred
+- On macOS, aliases containing non-ASCII characters (CJK, for example) are refused by `ssh`
+  itself under a UTF-8 locale, so those hosts cannot be reached through the generated
+  `sshconfig` and the self-check reports them and exits non-zero. Every other output format is
+  unaffected. See [issue #4](https://github.com/y01and3/termius-export/issues/4)
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware and must be regenerated
 - Passphrase-protected **PKCS#1 PEM** keys (`BEGIN RSA PRIVATE KEY` with `Proc-Type:
