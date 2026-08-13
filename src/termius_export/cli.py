@@ -8,10 +8,10 @@ import sys
 
 from . import fsperm
 from . import writers as writers_mod
-from .crypto import Decryptor, UnknownCipherVersion
+from .crypto import DecryptionFailed, Decryptor, UnknownCipherVersion
 from .datadir import candidates as data_dir_candidates
 from .datadir import default_data_dir
-from .localkey import LocalKeyNotFound, load_local_key
+from .localkey import LocalKeyNotFound, load_local_key, wrong_key_message
 from .model import Model
 from .normalize import build_model
 from .source import IndexedDbNotFound, locate_leveldb, read_tables
@@ -134,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     except UnknownCipherVersion as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except DecryptionFailed as exc:
+        # Reported separately from UnknownCipherVersion because the fix is different: an
+        # unknown header means upstream changed schemes, a MAC failure means we hold the wrong
+        # key and a different keyring entry will work. Without this the user got a traceback.
+        print(f"error: {exc}", file=sys.stderr)
+        print(wrong_key_message(key_source), file=sys.stderr)
         return 3
 
     out_dir = pathlib.Path(args.out).resolve()
