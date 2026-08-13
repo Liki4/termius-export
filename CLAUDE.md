@@ -40,6 +40,7 @@ verify.py     read outputs back, compare against the model
 | File | Responsibility |
 |---|---|
 | `source.py` | Read Chromium IndexedDB, deduplicate records |
+| `envelope.py` | The encrypted-field wire format: header detection, no dependencies |
 | `crypto.py` | XSalsa20-Poly1305 decryption, version-header validation |
 | `localkey.py` | Fetch `localKey` from the platform keyring |
 | `datadir.py` | Locate Termius's data directory, per platform and install type |
@@ -66,6 +67,11 @@ Standard NaCl secretbox with a two-byte version header prepended. The key is the
 `localKey` from the OS keyring — 32 bytes.
 
 **This was reverse-engineered, not documented.** See *Reverse-engineering method* below.
+
+The format itself lives in `envelope.py`, which imports nothing, and the decryption in
+`crypto.py`, which needs PyNaCl. That split is not tidiness: header detection is the rule this
+project is least willing to get wrong, and keeping it out of the module that pulls PyNaCl is
+what lets the test suite check it at all.
 
 Two rules enforced in `crypto.py`:
 
@@ -138,10 +144,22 @@ Two things measured on a real Mac, both absent on Linux:
   whichever `python3` ran it and would re-prompt whenever that changed.
 - **A machine can hold several entries, with different keys.** Moving between the DMG and App
   Store builds leaves the old one behind. One real Mac held `Termius` *and* `Termius (MAS)`,
-  both `account=localKey`, both valid 32-byte keys, and the two **differed**. `CANDIDATE_SERVICES`
-  tries `Termius` first, which is right for a DMG install and wrong for the mirror case. The
-  failure is loud — secretbox verifies a MAC — but `cli.py` used to let `DecryptionFailed`
-  escape as a bare traceback; it now prints `localkey.wrong_key_message`.
+  both `account=localKey`, both valid 32-byte keys, and the two **differed** — later confirmed
+  on a live dual install, not just reconstructed from leftovers.
+
+  No fixed `CANDIDATE_SERVICES` order can be right for both profiles on such a machine, so the
+  order is not asked to be. **Poly1305 decides.** `find_local_key` takes a validator and
+  returns the first entry that actually decrypts the data, rather than the first that exists;
+  `cli` reads the tables before choosing a key (it never needed one to read them) and tests
+  each candidate against one real ciphertext field. Guessing from install layout would have
+  worked here too, but it would have been a heuristic where a decisive test was available —
+  the same reasoning that produced the cipher format in the first place.
+
+  Two consequences worth knowing. Each extra candidate costs another keychain prompt on macOS,
+  which is why the loop stops at the first that works. And the field it tests against must
+  genuinely be ciphertext: a plaintext field "decrypts" under any key, so every candidate would
+  validate and selection would silently revert to first-one-wins. That is why `first_ciphertext`
+  lives in `envelope.py`, where the test suite can reach it.
 
 ---
 
@@ -285,6 +303,12 @@ Tests requiring a real Windows API call are guarded with
 `write_private` lives in `fsperm` rather than `cli`, why data-directory resolution lives in
 `datadir`, and why the "wrong key" message lives in `localkey`. When something in `cli` needs
 a test, move it out rather than importing `cli`.
+
+`envelope` was split out of `crypto` for the same reason, and it is the sharper case: the
+function that picks which field a candidate key is tested against has a silent failure mode.
+Return a plaintext field and it "decrypts" under every key, so every candidate validates and
+key selection quietly stops selecting. A behaviour that fails without any error is exactly the
+kind that has to be tested, so it cannot live behind a PyNaCl import.
 
 `normalize` **is** importable, and deliberately so: its two references to `Decryptor` and
 `RawTables` are annotations only, so they sit under `if TYPE_CHECKING` and the heavy modules
@@ -482,11 +506,20 @@ whole project, and one that would keep breaking as Chromium evolves.
   keychain authorization dialog appears on first run (trap 3). All 213 hosts are reachable
   through the generated `sshconfig`, 55 of them via the ASCII alias that this platform's ssh
   requires (trap 5)
-- The App Store build's data path is still **inferred**. Its bundle id is evidenced as
-  `com.termius.mac` — a leftover Group Container and a leftover `Termius (MAS)` keychain item on
-  a machine that had migrated to the DMG build share a creation date — but no sandboxed
-  container was available to read. `datadir.py` globs the container rather than hard-coding
-  that id, so being wrong about it costs less
+- **macOS App Store: measured too.** Bundle id `com.termius.mac` (read from the bundle, with
+  `Contents/_MASReceipt` present), data at
+  `~/Library/Containers/com.termius.mac/Data/Library/Application Support/Termius`, matched by
+  the container glob with nothing left to guess, and its `Termius (MAS)` keychain entry
+  decrypts that profile. `datadir.py` still globs rather than hard-coding the id, since the id
+  is Termius's to change
+- Do **not** identify the build with `osascript -e 'id of app "Termius"'`. With both builds
+  installed the App Store copy lands as `Termius 2.app`, so the name `Termius` still resolves
+  to the DMG bundle and the answer is silently wrong. Read `CFBundleIdentifier` from the
+  specific bundle
+- A freshly synced profile shows **no** LevelDB duplication: the App Store install reported 213
+  raw host rows for 213 hosts, against the DMG profile's 426 for the same data. Historical
+  generations accumulate with use rather than appearing at sync, so validating the dedup step
+  (trap 1) against a new install would suggest it does nothing
 - Hardware-backed keys (Apple Secure Enclave, Windows TPM) **cannot be exported** — the private
   key never leaves the hardware. Those must be regenerated
 - The Tabby writer has not been round-trip verified; see the `verified` table above
