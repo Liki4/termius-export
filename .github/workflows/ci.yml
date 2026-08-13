@@ -64,6 +64,8 @@ jobs:
         with:
           python-version: "3.12"
       # Pinned: an unpinned ruff turns "someone released a new rule" into "the build is red on
-      # an unrelated PR". Bump it deliberately.
+      # an unrelated PR". Bump it deliberately. The pin matters more for `format` than for
+      # `check`, since a formatter's output legitimately changes between releases.
       - run: pip install ruff==0.16.2
       - run: ruff check .
+      - run: ruff format --check .

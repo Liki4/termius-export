@@ -31,6 +31,12 @@ where = ["src"]
 line-length = 120
 src = ["src"]
 
+[tool.ruff.format]
+# ruff formats Python fenced in Markdown too. The snippets in CLAUDE.md and README.md are
+# illustrations, not code -- some are deliberately aligned to make a point, and one is not even
+# valid on its own -- so the formatter has no business rewriting them.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
