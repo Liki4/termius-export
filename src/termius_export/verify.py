@@ -62,19 +62,44 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
     if not model.hosts:
         return [Check("openssh: ssh -G parse", None, "no hosts to verify")]
 
+    # Probe the file with a destination that is guaranteed valid, rather than with the first
+    # host's alias. ssh parses the whole config either way, so a genuine syntax error is still
+    # fatal here - but an alias ssh refuses (see the loop below) would otherwise abort the
+    # entire verification at this point and report it as "ssh rejected the config". That is a
+    # far more alarming claim than the truth, and it would suppress every remaining check.
+    # Only reachable with a profile whose alphabetically first alias is one ssh rejects.
+    probe = "termius-export-probe.invalid"
     try:
-        _run(["ssh", "-G", "-F", str(path), model.hosts[0].alias], check=True)
+        _run(["ssh", "-G", "-F", str(path), probe], check=True)
     except subprocess.CalledProcessError as exc:
         first = (exc.stderr or "").strip().splitlines()
         return [Check("openssh: ssh -G parse", False, first[0] if first else "ssh rejected the config")]
 
     checks = [Check("openssh: ssh -G parse", True, "accepted by ssh itself")]
 
-    mismatches = []
+    mismatches: list[str] = []
+    rejected: list[str] = []
+    resolved = 0
     for h in model.hosts:
         if not h.address:
             continue
-        out = _run(["ssh", "-G", "-F", str(path), h.alias]).stdout
+        result = _run(["ssh", "-G", "-F", str(path), h.alias])
+        if result.returncode != 0:
+            # ssh refused the destination outright, so it resolved nothing and stdout is empty.
+            # Falling through to the value comparison would report this as "<alias>: hostname",
+            # a mismatch that never happened, and send the reader hunting for a wrong address
+            # instead of an unusable alias.
+            #
+            # The case that exposed it: ssh rejects a non-ASCII destination under a UTF-8
+            # locale ("hostname contains invalid characters", exit 255) and does so *before*
+            # reading the config, so no ssh_config content can rescue those hosts. It is
+            # locale-dependent, which is why a C-locale run never sees it.
+            reason = (result.stderr or "").strip().splitlines()
+            rejected.append(f"{h.alias} ({reason[0] if reason else f'exit {result.returncode}'})")
+            continue
+
+        resolved += 1
+        out = result.stdout
         # ssh canonicalises the hostname to lower case, so "EXAMPLE-Web-Host4" comes back as
         # "example-web-host4". DNS is case-insensitive; comparing case-sensitively here reported
         # every host with an uppercase address as a mismatch.
@@ -86,7 +111,17 @@ def verify_openssh(path: pathlib.Path, model: Model) -> list[Check]:
             mismatches.append(f"{h.alias}: user")
 
     checks.append(
-        Check("openssh: per-host readback", True, f"all {len(model.hosts)} hosts match")
+        Check("openssh: alias accepted by ssh", True, f"all {resolved} aliases accepted")
+        if not rejected
+        else Check(
+            "openssh: alias accepted by ssh",
+            False,
+            f"{len(rejected)} of {resolved + len(rejected)} rejected by ssh itself, so those "
+            f"hosts cannot be reached by alias: " + "; ".join(rejected[:3]),
+        )
+    )
+    checks.append(
+        Check("openssh: per-host readback", True, f"all {resolved} hosts match")
         if not mismatches
         else Check("openssh: per-host readback", False, "; ".join(mismatches[:5]))
     )

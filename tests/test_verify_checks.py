@@ -1,9 +1,14 @@
-"""Self-verification must not raise false alarms.
+"""Self-verification must not raise false alarms, and must name the right cause when it does.
 
-Both cases here were reported from a real 213-host export. Neither is a Windows problem and
+The first two cases were reported from a real 213-host export. Neither is a Windows problem and
 neither was introduced by the Windows work - they are checker bugs that a large enough dataset
 was always going to expose. A verification pass that cries wolf is worse than none, because it
 trains people to ignore it.
+
+The third came from the first real macOS run. It is the opposite failure: the check was right
+to fail, but it blamed the wrong thing. ssh had refused to run at all, and the report said the
+resolved hostname disagreed - which sends the reader looking for a wrong address instead of an
+unusable alias. A check that misnames the cause costs almost as much as one that cries wolf.
 """
 
 import shutil
@@ -53,6 +58,71 @@ class OpenSshReadbackTests(unittest.TestCase):
             path = _write(tmp, "sshconfig", "Host demo\n    HostName 10.9.9.9\n")
             failed = [c for c in verify_openssh(path, model) if c.passed is False]
         self.assertTrue(failed, "a real hostname mismatch must still fail")
+
+
+@unittest.skipUnless(shutil.which("ssh"), "ssh not installed")
+class OpenSshAliasRejectionTests(unittest.TestCase):
+    """An alias ssh refuses is a different defect from a value ssh disagrees with.
+
+    A space is refused by ssh's destination validation in every locale, so it is used here as a
+    stable stand-in for the case that actually occurs in the wild: a non-ASCII alias, which ssh
+    rejects only where the locale's single-byte ctype table says so. Pinning the test to the
+    non-ASCII case would make it pass or fail depending on LC_ALL.
+    """
+
+    def _by_name(self, config, model):
+        with tempfile.TemporaryDirectory() as tmp:
+            return {c.name: c for c in verify_openssh(_write(tmp, "sshconfig", config), model)}
+
+    def test_a_rejected_alias_is_not_reported_as_a_hostname_mismatch(self):
+        model = Model(hosts=[Host(id="h1", alias="has space", label="x", address="10.0.0.1")])
+        checks = self._by_name("Host has space\n    HostName 10.0.0.1\n", model)
+
+        alias_check = checks["openssh: alias accepted by ssh"]
+        self.assertIs(alias_check.passed, False)
+        self.assertIn("has space", alias_check.detail)
+        # ssh's own reason is carried through, in parentheses after the alias.
+        self.assertIn("(", alias_check.detail)
+
+        self.assertNotIn("hostname", checks["openssh: per-host readback"].detail)
+
+    def test_an_accepted_alias_passes_both_checks(self):
+        model = Model(hosts=[Host(id="h1", alias="demo", label="demo", address="10.0.0.1")])
+        checks = self._by_name("Host demo\n    HostName 10.0.0.1\n", model)
+        self.assertIs(checks["openssh: alias accepted by ssh"].passed, True)
+        self.assertIs(checks["openssh: per-host readback"].passed, True)
+
+    def test_a_rejected_alias_does_not_mask_a_real_mismatch(self):
+        model = Model(
+            hosts=[
+                Host(id="h1", alias="has space", label="x", address="10.0.0.1"),
+                Host(id="h2", alias="demo", label="demo", address="10.0.0.2"),
+            ]
+        )
+        config = "Host has space\n    HostName 10.0.0.1\n\nHost demo\n    HostName 10.9.9.9\n"
+        checks = self._by_name(config, model)
+        self.assertIs(checks["openssh: alias accepted by ssh"].passed, False)
+        self.assertIs(checks["openssh: per-host readback"].passed, False)
+        self.assertIn("demo: hostname", checks["openssh: per-host readback"].detail)
+
+    def test_a_rejected_first_alias_does_not_abort_the_whole_verification(self):
+        """The parse probe must not use a host alias.
+
+        Hosts are sorted by alias, so a profile whose aliases are all non-ASCII puts a
+        rejected one first. Probing with it reported a perfectly good config as "ssh rejected
+        the config" and suppressed every check after it.
+        """
+        model = Model(hosts=[Host(id="h1", alias="has space", label="x", address="10.0.0.1")])
+        checks = self._by_name("Host has space\n    HostName 10.0.0.1\n", model)
+        self.assertIs(checks["openssh: ssh -G parse"].passed, True)
+        self.assertIn("openssh: per-host readback", checks, "later checks must still run")
+
+    def test_a_genuinely_broken_config_is_still_caught(self):
+        model = Model(hosts=[Host(id="h1", alias="demo", label="demo", address="10.0.0.1")])
+        # An unquoted IdentityFile path with a space: ssh rejects the whole file.
+        broken = "Host demo\n    HostName 10.0.0.1\n    IdentityFile /tmp/a b/id_rsa\n"
+        checks = self._by_name(broken, model)
+        self.assertIs(checks["openssh: ssh -G parse"].passed, False)
 
 
 class TabbyQuoteTests(unittest.TestCase):
